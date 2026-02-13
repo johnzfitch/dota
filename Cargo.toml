@@ -1,0 +1,58 @@
+[package]
+name = "dota"
+version = "0.1.0"
+edition = "2024"
+authors = ["zack"]
+description = "Defense of the Artifacts - Post-quantum secure secrets manager with TUI"
+license = "MIT"
+
+[dependencies]
+# Cryptography - Post-quantum and classical
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1.7", features = ["derive"] }
+rand = "0.8"
+rand_core = "0.6"
+
+# TUI and CLI
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4.5", features = ["derive"] }
+rpassword = "7.3"
+
+# Data serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+# Error handling and utilities
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Clipboard (optional async runtime)
+arboard = "3.4"
+tokio = { version = "1.41", features = ["time", "rt"] }
+
+# ANSI art parsing
+codepage-437 = "0.1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# System directories
+dirs = "5.0"
+
+[dev-dependencies]
+tempfile = "3.13"
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization
+strip = true         # Strip symbols
+panic = "abort"      # Smaller binary
