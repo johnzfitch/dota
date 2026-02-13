@@ -1,0 +1,24 @@
+# Defense of the Artifacts (dota)
+
+> Post-quantum secure secrets manager with hybrid ML-KEM-768 + X25519 encryption
+
+## Docs
+
+- [README](./README.md): Overview, quickstart, and security model
+- [AGENTS](./AGENTS.md): Agent instructions for development
+- [LICENSE](./LICENSE): MIT license
+
+## Code
+
+- [Main](./src/main.rs): CLI entry point
+- [Hybrid KEM](./src/crypto/hybrid.rs): ML-KEM-768 + X25519 combination
+- [Vault ops](./src/vault/ops.rs): Load, save, CRUD operations
+- [TUI](./src/tui/app.rs): Terminal user interface
+
+## Deep details (optional)
+
+- [ML-KEM wrapper](./src/crypto/mlkem.rs): Post-quantum KEM
+- [X25519 wrapper](./src/crypto/x25519.rs): Classical ECDH
+- [Key derivation](./src/crypto/kdf.rs): Argon2 + HKDF
+- [AES-GCM](./src/crypto/aes_gcm.rs): Authenticated encryption
+- [Vault format](./src/vault/format.rs): JSON structure and versioning
