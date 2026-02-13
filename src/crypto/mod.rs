@@ -16,10 +16,8 @@ pub mod x25519;
 // Re-export commonly used types
 pub use aes_gcm::{AesKey, decrypt as aes_decrypt, encrypt as aes_encrypt};
 pub use hybrid::{hybrid_decapsulate, hybrid_encapsulate};
-pub use kdf::{derive_key, generate_salt, KdfConfig, MasterKey};
+pub use kdf::{KdfConfig, MasterKey, derive_key, generate_salt};
 pub use mlkem::{
-    generate_keypair as mlkem_generate_keypair, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
+    MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey, generate_keypair as mlkem_generate_keypair,
 };
-pub use x25519::{
-    generate_keypair as x25519_generate_keypair, X25519PrivateKey, X25519PublicKey,
-};
+pub use x25519::{X25519PrivateKey, X25519PublicKey, generate_keypair as x25519_generate_keypair};
