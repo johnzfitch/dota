@@ -8,13 +8,10 @@ use crate::crypto::{
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rand::RngCore;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -369,45 +366,29 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
 fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
-    if let Ok(metadata) = fs::symlink_metadata(vault_path)
-        && metadata.file_type().is_symlink()
-    {
-        anyhow::bail!("Refusing to write vault through symlink: {}", path);
+    if let Ok(meta) = fs::symlink_metadata(vault_path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("Refusing to write vault through symlink: {}", path);
+        }
     }
 
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
-
     let json = serde_json::to_string_pretty(vault).context("Failed to serialize vault")?;
 
-    let tmp_path = temp_vault_path(parent);
-    let mut tmp = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&tmp_path)
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".vault.tmp-")
+        .tempfile_in(parent)
         .context("Failed to create temporary vault file")?;
-    tmp.write_all(json.as_bytes())
-        .context("Failed to write temporary vault file")?;
-    tmp.sync_all()
-        .context("Failed to sync temporary vault file")?;
-    drop(tmp);
 
-    fs::rename(&tmp_path, vault_path).context("Failed to persist vault file")?;
-    let mut perms = fs::metadata(vault_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(vault_path, perms)?;
+    tmp.write_all(json.as_bytes())
+        .context("Failed to write vault data")?;
+    tmp.as_file().sync_all()
+        .context("Failed to sync vault data")?;
+
+    tmp.persist(vault_path)
+        .context("Failed to persist vault file")?;
 
     Ok(())
-}
-
-fn temp_vault_path(parent: &Path) -> PathBuf {
-    let mut rand_bytes = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut rand_bytes);
-    parent.join(format!(
-        ".vault.tmp-{}-{:x}",
-        std::process::id(),
-        u64::from_le_bytes(rand_bytes)
-    ))
 }
 
 /// Convert MasterKey to AesKey (helper for type conversion)
