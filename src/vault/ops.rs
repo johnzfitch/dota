@@ -1,17 +1,20 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
-use super::format::{EncryptedSecret, KdfParams, KemKeyPair, Vault, X25519KeyPair, VAULT_VERSION};
+use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
 use crate::crypto::{
-    aes_decrypt, aes_encrypt, derive_key, generate_salt, hybrid_decapsulate, hybrid_encapsulate,
-    mlkem_generate_keypair, x25519_generate_keypair, KdfConfig, MasterKey, MlKemCiphertext,
-    MlKemPrivateKey, MlKemPublicKey, X25519PrivateKey, X25519PublicKey,
+    KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey, X25519PrivateKey,
+    X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt, hybrid_decapsulate,
+    hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -54,10 +57,8 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
     // Encrypt private keys with master key
     let aes_key = master_key_to_aes_key(&master_key);
-    let (encrypted_mlkem_sk, mlkem_nonce) =
-        aes_encrypt(&aes_key, mlkem_private.as_bytes())?;
-    let (encrypted_x25519_sk, x25519_nonce) =
-        aes_encrypt(&aes_key, x25519_private.as_bytes())?;
+    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&aes_key, mlkem_private.as_bytes())?;
+    let (encrypted_x25519_sk, x25519_nonce) = aes_encrypt(&aes_key, x25519_private.as_bytes())?;
 
     // Create vault structure
     let vault = Vault {
@@ -89,14 +90,8 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         fs::create_dir_all(parent).context("Failed to create vault directory")?;
     }
 
-    // Write vault to file
-    let json = serde_json::to_string_pretty(&vault).context("Failed to serialize vault")?;
-    fs::write(vault_path, json).context("Failed to write vault file")?;
-
-    // Set restrictive permissions (0600)
-    let mut perms = fs::metadata(vault_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(vault_path, perms)?;
+    // Write vault to file with atomic replace and restrictive permissions.
+    save_vault_file(vault_path, &vault)?;
 
     Ok(())
 }
@@ -162,7 +157,10 @@ pub fn set_secret(unlocked: &mut UnlockedVault, name: &str, value: &str) -> Resu
     // Parse public keys
     let mlkem_public = MlKemPublicKey::from_bytes(unlocked.vault.kem.public_key.clone())?;
     let x25519_public = X25519PublicKey::from_bytes(
-        unlocked.vault.x25519.public_key
+        unlocked
+            .vault
+            .x25519
+            .public_key
             .as_slice()
             .try_into()
             .context("Invalid X25519 public key length")?,
@@ -186,7 +184,11 @@ pub fn set_secret(unlocked: &mut UnlockedVault, name: &str, value: &str) -> Resu
             x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
             nonce: nonce.to_vec(),
             ciphertext,
-            created: if is_new { now } else { unlocked.vault.secrets[name].created },
+            created: if is_new {
+                now
+            } else {
+                unlocked.vault.secrets[name].created
+            },
             modified: now,
         },
     );
@@ -240,7 +242,8 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     };
 
     let existing_names = list_secrets(unlocked);
-    let mut secrets: Vec<(String, String, chrono::DateTime<Utc>)> = Vec::with_capacity(existing_names.len());
+    let mut secrets: Vec<(String, String, chrono::DateTime<Utc>)> =
+        Vec::with_capacity(existing_names.len());
     for name in &existing_names {
         let entry = unlocked
             .vault
@@ -317,7 +320,8 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<String> {
     // Parse KEM ciphertext and X25519 ephemeral public key
     let kem_ct = MlKemCiphertext::from_bytes(encrypted.kem_ciphertext.clone())?;
     let x25519_eph_pk = X25519PublicKey::from_bytes(
-        encrypted.x25519_ephemeral_public
+        encrypted
+            .x25519_ephemeral_public
             .as_slice()
             .try_into()
             .context("Invalid X25519 ephemeral public key length")?,
@@ -357,16 +361,53 @@ pub fn list_secrets(unlocked: &UnlockedVault) -> Vec<String> {
 
 /// Save vault to disk
 fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
-    let json = serde_json::to_string_pretty(&unlocked.vault)
-        .context("Failed to serialize vault")?;
-    fs::write(&unlocked.path, json).context("Failed to write vault file")?;
-
-    // Ensure permissions remain 0600
-    let mut perms = fs::metadata(&unlocked.path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&unlocked.path, perms)?;
+    save_vault_file(&unlocked.path, &unlocked.vault)?;
 
     Ok(())
+}
+
+/// Safely save vault JSON to disk with symlink protection and atomic replace.
+fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
+    let vault_path = Path::new(path);
+    if let Ok(metadata) = fs::symlink_metadata(vault_path)
+        && metadata.file_type().is_symlink()
+    {
+        anyhow::bail!("Refusing to write vault through symlink: {}", path);
+    }
+
+    let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let json = serde_json::to_string_pretty(vault).context("Failed to serialize vault")?;
+
+    let tmp_path = temp_vault_path(parent);
+    let mut tmp = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&tmp_path)
+        .context("Failed to create temporary vault file")?;
+    tmp.write_all(json.as_bytes())
+        .context("Failed to write temporary vault file")?;
+    tmp.sync_all()
+        .context("Failed to sync temporary vault file")?;
+    drop(tmp);
+
+    fs::rename(&tmp_path, vault_path).context("Failed to persist vault file")?;
+    let mut perms = fs::metadata(vault_path)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(vault_path, perms)?;
+
+    Ok(())
+}
+
+fn temp_vault_path(parent: &Path) -> PathBuf {
+    let mut rand_bytes = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut rand_bytes);
+    parent.join(format!(
+        ".vault.tmp-{}-{:x}",
+        std::process::id(),
+        u64::from_le_bytes(rand_bytes)
+    ))
 }
 
 /// Convert MasterKey to AesKey (helper for type conversion)
@@ -377,7 +418,8 @@ fn master_key_to_aes_key(mk: &MasterKey) -> crate::crypto::AesKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
+    use std::os::unix::fs as unix_fs;
+    use tempfile::{NamedTempFile, tempdir};
 
     #[test]
     fn test_create_and_unlock_vault() {
@@ -445,5 +487,16 @@ mod tests {
 
         let names = list_secrets(&unlocked);
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
+    }
+
+    #[test]
+    fn test_create_vault_rejects_symlink_path() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("real-vault.json");
+        let symlink = dir.path().join("vault.json");
+        unix_fs::symlink(&target, &symlink).unwrap();
+
+        let err = create_vault("test-passphrase", symlink.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
     }
 }
