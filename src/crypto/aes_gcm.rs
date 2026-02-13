@@ -1,8 +1,8 @@
 //! AES-256-GCM authenticated encryption
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, OsRng},
 };
 use anyhow::{Context, Result};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -33,8 +33,7 @@ pub fn generate_nonce() -> [u8; 12] {
 
 /// Encrypt plaintext using AES-256-GCM
 pub fn encrypt(key: &AesKey, plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12])> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .context("Invalid AES key length")?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).context("Invalid AES key length")?;
 
     let nonce_bytes = generate_nonce();
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -48,14 +47,16 @@ pub fn encrypt(key: &AesKey, plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12])> {
 
 /// Decrypt ciphertext using AES-256-GCM
 pub fn decrypt(key: &AesKey, ciphertext: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .context("Invalid AES key length")?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).context("Invalid AES key length")?;
 
     let nonce = Nonce::from_slice(nonce);
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("AES-GCM decryption failed (wrong key or corrupted data): {}", e))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        anyhow::anyhow!(
+            "AES-GCM decryption failed (wrong key or corrupted data): {}",
+            e
+        )
+    })?;
 
     Ok(plaintext)
 }

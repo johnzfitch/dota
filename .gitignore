@@ -1,6 +1,5 @@
 # Rust build artifacts
 /target
-Cargo.lock
 
 # Vault files (NEVER commit secrets!)
 vault.json

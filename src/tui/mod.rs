@@ -3,10 +3,8 @@
 
 pub mod app;
 
+use crate::vault::ops::{get_secret, list_secrets, remove_secret, set_secret, unlock_vault};
 use anyhow::Result;
-use crate::vault::ops::{
-    get_secret, list_secrets, remove_secret, set_secret, unlock_vault,
-};
 use rpassword::prompt_password;
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -80,7 +78,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                         }
                         merged
                     } else {
-                        prompt_password(&format!("Enter value for '{}': ", name))?
+                        prompt_password(format!("Enter value for '{}': ", name))?
                     };
 
                     match set_secret(&mut unlocked, name, &value) {
@@ -107,13 +105,22 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("─────────────────");
                 println!("Location:      {}", vault_path);
                 println!("Version:       {}", unlocked.vault.version);
-                println!("Created:       {}", unlocked.vault.created.format("%Y-%m-%d %H:%M:%S"));
+                println!(
+                    "Created:       {}",
+                    unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
+                );
                 println!("Secrets:       {}", unlocked.vault.secrets.len());
                 println!();
                 println!("Cryptography");
                 println!("─────────────────");
                 println!("KEM:           {}", unlocked.vault.kem.algorithm);
-                println!("KDF:           {} (t={}, m={}, p={})", unlocked.vault.kdf.algorithm, unlocked.vault.kdf.time_cost, unlocked.vault.kdf.memory_cost, unlocked.vault.kdf.parallelism);
+                println!(
+                    "KDF:           {} (t={}, m={}, p={})",
+                    unlocked.vault.kdf.algorithm,
+                    unlocked.vault.kdf.time_cost,
+                    unlocked.vault.kdf.memory_cost,
+                    unlocked.vault.kdf.parallelism
+                );
                 println!("Encryption:    AES-256-GCM");
                 println!("Key Derivation: HKDF-SHA256");
             }
@@ -124,15 +131,13 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                     }
                 }
             }
-            "refresh" => {
-                match unlock_vault(&passphrase, &vault_path) {
-                    Ok(fresh) => {
-                        unlocked = fresh;
-                        println!("Refreshed vault from disk");
-                    }
-                    Err(e) => println!("error: {}", e),
+            "refresh" => match unlock_vault(&passphrase, &vault_path) {
+                Ok(fresh) => {
+                    unlocked = fresh;
+                    println!("Refreshed vault from disk");
                 }
-            }
+                Err(e) => println!("error: {}", e),
+            },
             "quit" | "exit" => {
                 break;
             }

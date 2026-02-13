@@ -4,10 +4,7 @@
 //! hardened parameters: t=3, m=65536 KiB (64 MiB), p=4
 
 use anyhow::Result;
-use argon2::{
-    password_hash::SaltString,
-    Algorithm, Argon2, Params, Version,
-};
+use argon2::{Algorithm, Argon2, Params, Version, password_hash::SaltString};
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -50,7 +47,10 @@ impl Default for KdfConfig {
 
 /// Generate a random salt for KDF
 pub fn generate_salt() -> Vec<u8> {
-    SaltString::generate(&mut OsRng).as_str().as_bytes().to_vec()
+    SaltString::generate(&mut OsRng)
+        .as_str()
+        .as_bytes()
+        .to_vec()
 }
 
 /// Derive master key from passphrase using Argon2id

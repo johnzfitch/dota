@@ -87,13 +87,13 @@ mod tests {
     fn test_is_shell_var_name_rejects_injection() {
         // Reject shell metacharacters that could enable injection
         assert!(!is_shell_var_name("FOO; rm -rf /")); // Command injection
-        assert!(!is_shell_var_name("FOO$(whoami)"));  // Command substitution
-        assert!(!is_shell_var_name("FOO`whoami`"));   // Backtick command substitution
-        assert!(!is_shell_var_name("FOO|bar"));       // Pipe
-        assert!(!is_shell_var_name("FOO&bar"));       // Background
-        assert!(!is_shell_var_name("FOO>file"));      // Redirect
-        assert!(!is_shell_var_name("FOO-BAR"));       // Hyphen (invalid in shell var)
-        assert!(!is_shell_var_name("123FOO"));        // Cannot start with digit
-        assert!(!is_shell_var_name("FOO BAR"));       // No spaces
+        assert!(!is_shell_var_name("FOO$(whoami)")); // Command substitution
+        assert!(!is_shell_var_name("FOO`whoami`")); // Backtick command substitution
+        assert!(!is_shell_var_name("FOO|bar")); // Pipe
+        assert!(!is_shell_var_name("FOO&bar")); // Background
+        assert!(!is_shell_var_name("FOO>file")); // Redirect
+        assert!(!is_shell_var_name("FOO-BAR")); // Hyphen (invalid in shell var)
+        assert!(!is_shell_var_name("123FOO")); // Cannot start with digit
+        assert!(!is_shell_var_name("FOO BAR")); // No spaces
     }
 }

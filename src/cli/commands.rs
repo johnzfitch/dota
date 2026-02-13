@@ -51,7 +51,7 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
     // Get value from args or prompt
     let secret_value = match value {
         Some(v) => v,
-        None => prompt_password(&format!("Enter value for '{}': ", name))?,
+        None => prompt_password(format!("Enter value for '{}': ", name))?,
     };
 
     // Unlock vault
@@ -98,7 +98,11 @@ pub fn handle_list(vault_path: Option<String>) -> Result<()> {
         println!("Secrets ({}):", names.len());
         for name in names {
             let secret = &unlocked.vault.secrets[&name];
-            println!("  {} (modified: {})", name, secret.modified.format("%Y-%m-%d %H:%M:%S"));
+            println!(
+                "  {} (modified: {})",
+                name,
+                secret.modified.format("%Y-%m-%d %H:%M:%S")
+            );
         }
     }
 
@@ -134,13 +138,17 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     println!("─────────────────");
     println!("Location:      {}", vault_path);
     println!("Version:       {}", unlocked.vault.version);
-    println!("Created:       {}", unlocked.vault.created.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Created:       {}",
+        unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
+    );
     println!("Secrets:       {}", unlocked.vault.secrets.len());
     println!();
     println!("Cryptography");
     println!("─────────────────");
     println!("KEM:           {}", unlocked.vault.kem.algorithm);
-    println!("KDF:           {} (t={}, m={}, p={})",
+    println!(
+        "KDF:           {} (t={}, m={}, p={})",
         unlocked.vault.kdf.algorithm,
         unlocked.vault.kdf.time_cost,
         unlocked.vault.kdf.memory_cost,
