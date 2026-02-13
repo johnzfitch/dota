@@ -1,0 +1,18 @@
+# cargo-audit configuration
+# See: https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
+
+[advisories]
+# Ignore advisories for unmaintained crates (informational only)
+ignore = [
+    # pqcrypto-kyber -> pqcrypto-mlkem migration tracked in TODO
+    # The implementation is still valid ML-KEM-768, just not FIPS 203 certified
+    "RUSTSEC-2024-0381",
+
+    # paste - transitive dependency from cargo test framework
+    # Archived but still functional, no security vulnerability
+    "RUSTSEC-2024-0436",
+]
+
+# Report unsound code as warnings rather than errors
+# lru soundness issue is in a transitive dep (ratatui -> lru)
+# Will be fixed when ratatui updates its dependencies

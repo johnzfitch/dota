@@ -27,11 +27,11 @@ dota list
 ```mermaid
 flowchart LR
     A[Passphrase] -->|Argon2| B[Master Key]
-    B --> C[ML-KEM-768 KEM]
-    B --> D[X25519 ECDH]
-    C --> E[HKDF-SHA256]
+    B --> C["ML-KEM-768 KEM"]
+    B --> D["X25519 ECDH"]
+    C --> E["HKDF-SHA256"]
     D --> E
-    E --> F[AES-256-GCM]
+    E --> F["AES-256-GCM"]
     F --> G[Encrypted Secrets]
 ```
 
