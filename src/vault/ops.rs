@@ -366,10 +366,10 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
 fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
-    if let Ok(meta) = fs::symlink_metadata(vault_path) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!("Refusing to write vault through symlink: {}", path);
-        }
+    if let Ok(meta) = fs::symlink_metadata(vault_path)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!("Refusing to write vault through symlink: {}", path);
     }
 
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
@@ -382,7 +382,8 @@ fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
 
     tmp.write_all(json.as_bytes())
         .context("Failed to write vault data")?;
-    tmp.as_file().sync_all()
+    tmp.as_file()
+        .sync_all()
         .context("Failed to sync vault data")?;
 
     tmp.persist(vault_path)
