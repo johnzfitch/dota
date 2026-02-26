@@ -7,6 +7,18 @@ use crate::vault::ops::{
 use anyhow::Result;
 use rpassword::prompt_password;
 
+/// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
+/// The env var is intended for daemon contexts (e.g. systemd services) where no
+/// terminal is available. Never log or print the passphrase.
+fn read_passphrase(prompt: &str) -> Result<String> {
+    if let Ok(p) = std::env::var("DOTA_PASSPHRASE") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    Ok(prompt_password(prompt)?)
+}
+
 /// Handle 'init' command
 pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
@@ -70,8 +82,8 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
 pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = prompt_password("Vault passphrase: ")?;
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for non-interactive/daemon use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(&passphrase, &vault_path)?;
 
     // Get and print secret
