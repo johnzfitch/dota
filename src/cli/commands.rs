@@ -66,8 +66,8 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
         None => prompt_password(format!("Enter value for '{}': ", name))?,
     };
 
-    // Unlock vault
-    let passphrase = prompt_password("Vault passphrase: ")?;
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(&passphrase, &vault_path)?;
 
     // Set secret
@@ -97,8 +97,8 @@ pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
 pub fn handle_list(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = prompt_password("Vault passphrase: ")?;
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(&passphrase, &vault_path)?;
 
     // List secrets
