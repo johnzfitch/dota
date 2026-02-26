@@ -60,10 +60,19 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
 pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Get value from args or prompt
+    // Get value from args, stdin (if piped), or interactive prompt
     let secret_value = match value {
         Some(v) => v,
-        None => prompt_password(format!("Enter value for '{}': ", name))?,
+        None => {
+            use std::io::{IsTerminal, Read};
+            if std::io::stdin().is_terminal() {
+                prompt_password(format!("Enter value for '{}': ", name))?
+            } else {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf.trim_end().to_string()
+            }
+        }
     };
 
     // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)

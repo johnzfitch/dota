@@ -30,7 +30,8 @@ pub enum Commands {
     Set {
         /// Secret name
         name: String,
-        /// Secret value (if omitted, will prompt)
+        /// Secret value (if omitted, reads from stdin or prompts)
+        #[arg(allow_hyphen_values = true)]
         value: Option<String>,
     },
 
