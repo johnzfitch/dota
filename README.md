@@ -68,9 +68,9 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
 ### Key derivation
 
-1. Passphrase → Argon2id (64 MiB, 3 iterations, 4 threads, 32-byte output)
-2. Master key → Split into ML-KEM seed (32 bytes) and X25519 seed (32 bytes)
-3. Deterministic keypair generation from seeds
+1. Passphrase → Argon2id (64 MiB, 3 iterations, 4 threads, 32-byte master key)
+2. Master key → Used to encrypt and authenticate the vault that stores ML-KEM-768 and X25519 key material
+3. ML-KEM-768 and X25519 keypairs are generated randomly and stored encrypted in the vault (no deterministic derivation from the master key)
 
 ### Secret encryption
 
