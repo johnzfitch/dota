@@ -96,7 +96,7 @@ JSON structure with versioning (current: v4):
 dota init                   Initialize new vault
 dota unlock                 Launch TUI (default command)
 dota set <NAME> <VALUE>     Store a secret
-dota get <NAME>             Retrieve a secret (copies to clipboard)
+dota get <NAME>             Retrieve a secret
 dota list                   List all secret names
 dota rm <NAME>              Remove a secret
 dota export-env [NAMES...]  Export secrets as shell variables
@@ -121,7 +121,6 @@ dota info                   Show vault metadata
 ## Troubleshooting
 
 - **"Failed to decrypt vault"**: Incorrect passphrase or corrupted vault file. Check `~/.local/share/dota/vault.dota`.
-- **Clipboard not working**: Requires X11/Wayland display on Linux, or macOS/Windows clipboard access. Check `DISPLAY` environment variable.
 - **Slow unlock**: Argon2id intentionally uses 64 MiB RAM and 3 iterations with 4 threads. Adjust parameters in vault metadata only if you understand the security tradeoffs.
 
 ## Development

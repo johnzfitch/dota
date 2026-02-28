@@ -7,9 +7,9 @@ use crate::crypto::{
     hybrid_decapsulate, hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
 };
 use anyhow::{Context, Result};
+use chrono::Utc;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -412,7 +412,8 @@ const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
 /// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
 fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
-    let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())?;
+    let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())
+        .map_err(|_| anyhow::anyhow!("master key too short for HKDF-Expand PRK"))?;
 
     let mut mlkem_key = [0u8; 32];
     hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
