@@ -5,7 +5,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Vault file format version
-pub const VAULT_VERSION: u32 = 3;
+///
+/// v3 → v4: Purpose-labeled HKDF-Expand for key wrapping (key separation).
+///           The master key is no longer used directly as an AES key. Instead,
+///           separate wrapping keys are derived via HKDF-Expand with distinct
+///           purpose labels for ML-KEM and X25519 private key encryption.
+pub const VAULT_VERSION: u32 = 4;
 
 /// Top-level vault structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

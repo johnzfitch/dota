@@ -15,6 +15,7 @@ use super::{
 use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 /// Context string for HKDF (prevents cross-protocol attacks)
 const HKDF_CONTEXT: &[u8] = b"dota-v2-secret";
@@ -74,16 +75,21 @@ fn combine_shared_secrets(
     x25519_ss: &X25519SharedSecret,
 ) -> Result<AesKey> {
     // Concatenate shared secrets: kem_ss || x25519_ss
-    let mut ikm = Vec::with_capacity(64);
-    ikm.extend_from_slice(kem_ss.as_bytes());
-    ikm.extend_from_slice(x25519_ss.as_bytes());
+    let mut ikm = vec![0u8; 64];
+    ikm[..32].copy_from_slice(kem_ss.as_bytes());
+    ikm[32..].copy_from_slice(x25519_ss.as_bytes());
 
     // HKDF-Extract and HKDF-Expand to derive 256-bit AES key
     let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &ikm);
     let mut okm = [0u8; 32];
-    hk.expand(HKDF_CONTEXT, &mut okm)
-        .map_err(|e| anyhow::anyhow!("HKDF expansion failed: {}", e))?;
+    let result = hk
+        .expand(HKDF_CONTEXT, &mut okm)
+        .map_err(|e| anyhow::anyhow!("HKDF expansion failed: {}", e));
 
+    // Zeroize IKM containing both shared secrets before returning
+    ikm.zeroize();
+
+    result?;
     Ok(AesKey::from_bytes(okm))
 }
 

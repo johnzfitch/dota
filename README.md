@@ -54,9 +54,8 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 ## Design constraints
 
 - **Trust boundary**: Vault file must be protected at rest (use disk encryption)
-- **Passphrase strength**: Argon2 with 19MiB memory, 2 iterations, 1 thread (OWASP recommendations)
+- **Passphrase strength**: Argon2id with 64 MiB memory, 3 iterations, 4 threads (OWASP 2024 recommended parameters)
 - **No network**: All operations are local; no cloud sync or remote key escrow
-- **Clipboard security**: Secrets copied to clipboard are cleared after 45 seconds (configurable via `DOTA_CLIPBOARD_TIMEOUT`)
 
 ## Security assumptions
 
@@ -69,7 +68,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
 ### Key derivation
 
-1. Passphrase → Argon2id (19MiB, 2 iterations, 1 thread, 32-byte output)
+1. Passphrase → Argon2id (64 MiB, 3 iterations, 4 threads, 32-byte output)
 2. Master key → Split into ML-KEM seed (32 bytes) and X25519 seed (32 bytes)
 3. Deterministic keypair generation from seeds
 
@@ -84,7 +83,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
 ### Vault format
 
-JSON structure with versioning (current: v2):
+JSON structure with versioning (current: v4):
 - `version`: Protocol version for forward compatibility
 - `crypto`: Argon2 parameters and keypair metadata
 - `secrets`: Map of name → (kem_ct, x25519_ephem_pk, aes_ct, nonce, tag, timestamp)
@@ -123,7 +122,7 @@ dota info                   Show vault metadata
 
 - **"Failed to decrypt vault"**: Incorrect passphrase or corrupted vault file. Check `~/.local/share/dota/vault.dota`.
 - **Clipboard not working**: Requires X11/Wayland display on Linux, or macOS/Windows clipboard access. Check `DISPLAY` environment variable.
-- **Slow unlock**: Argon2 intentionally uses 19MiB RAM and 2 iterations. Adjust parameters in vault metadata only if you understand the security tradeoffs.
+- **Slow unlock**: Argon2id intentionally uses 64 MiB RAM and 3 iterations with 4 threads. Adjust parameters in vault metadata only if you understand the security tradeoffs.
 
 ## Development
 
