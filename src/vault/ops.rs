@@ -412,7 +412,7 @@ const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
 /// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
 fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
-    let hk = Hkdf::<Sha256>::new(None, mk.as_bytes());
+    let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())?;
 
     let mut mlkem_key = [0u8; 32];
     hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
