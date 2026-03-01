@@ -71,7 +71,13 @@ pub fn derive_key(passphrase: &str, config: &KdfConfig) -> Result<MasterKey> {
         .hash_password_into(passphrase.as_bytes(), &config.salt, &mut output)
         .map_err(|e| anyhow::anyhow!("Argon2 derivation failed: {}", e))?;
 
-    Ok(MasterKey(output))
+    let key = MasterKey(output);
+    // Zeroize the stack buffer — the data now lives inside MasterKey
+    // (which has ZeroizeOnDrop). Use black_box to prevent the compiler
+    // from eliding this write.
+    output.zeroize();
+    std::hint::black_box(&output);
+    Ok(key)
 }
 
 #[cfg(test)]
