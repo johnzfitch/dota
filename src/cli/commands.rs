@@ -11,10 +11,10 @@ use rpassword::prompt_password;
 /// The env var is intended for daemon contexts (e.g. systemd services) where no
 /// terminal is available. Never log or print the passphrase.
 fn read_passphrase(prompt: &str) -> Result<String> {
-    if let Ok(p) = std::env::var("DOTA_PASSPHRASE") {
-        if !p.is_empty() {
-            return Ok(p);
-        }
+    if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
+        && !p.is_empty()
+    {
+        return Ok(p);
     }
     Ok(prompt_password(prompt)?)
 }
@@ -69,10 +69,14 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
                 prompt_password(format!("Enter value for '{}': ", name))?
             } else {
                 let mut buf = String::new();
-                std::io::stdin().take(1024 * 1024).read_to_string(&mut buf)?;
+                std::io::stdin()
+                    .take(1024 * 1024)
+                    .read_to_string(&mut buf)?;
                 let trimmed = buf.trim_end();
                 if trimmed.is_empty() {
-                    anyhow::bail!("empty value from stdin; pass a value as an argument or use an interactive terminal");
+                    anyhow::bail!(
+                        "empty value from stdin; pass a value as an argument or use an interactive terminal"
+                    );
                 }
                 trimmed.to_string()
             }

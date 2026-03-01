@@ -56,8 +56,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
     // Derive separate wrapping keys for each private key (key separation)
     let wrapping = derive_wrapping_keys(&master_key)?;
-    let (encrypted_mlkem_sk, mlkem_nonce) =
-        aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
+    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
         aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
 
