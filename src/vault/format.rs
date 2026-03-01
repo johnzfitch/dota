@@ -29,7 +29,11 @@ pub struct Vault {
     pub kdf: KdfParams,
     /// HMAC-SHA256 commitment over KDF params + public keys, keyed by master key.
     /// Absent in v4 vaults (auto-added on next save).
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_base64_serde")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_base64_serde"
+    )]
     pub key_commitment: Option<Vec<u8>>,
     pub kem: KemKeyPair,
     pub x25519: X25519KeyPair,

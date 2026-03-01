@@ -157,7 +157,7 @@ pub fn install_signal_handlers() {
         use linux::*;
         unsafe {
             for &sig in &[SIGTERM, SIGINT, SIGHUP] {
-                signal(sig, signal_handler as usize);
+                signal(sig, signal_handler as *const () as usize);
             }
         }
     }

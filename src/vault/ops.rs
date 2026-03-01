@@ -552,6 +552,7 @@ fn compute_key_commitment(
 /// - Versions < 4 are rejected (no vaults in the wild).
 /// - Version 4 → 5: adds key commitment, bumps version.
 /// - Version 5: already current, no-op.
+#[allow(dead_code)]
 pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
     let mut vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
