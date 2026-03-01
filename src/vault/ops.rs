@@ -2,12 +2,14 @@
 
 use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
 use crate::crypto::{
-    KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey, X25519PrivateKey,
-    X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt, hybrid_decapsulate,
-    hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
+    AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
+    X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
+    hybrid_decapsulate, hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
+use hkdf::Hkdf;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -52,10 +54,11 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     // Generate X25519 keypair
     let (x25519_public, x25519_private) = x25519_generate_keypair();
 
-    // Encrypt private keys with master key
-    let aes_key = master_key_to_aes_key(&master_key);
-    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&aes_key, mlkem_private.as_bytes())?;
-    let (encrypted_x25519_sk, x25519_nonce) = aes_encrypt(&aes_key, x25519_private.as_bytes())?;
+    // Derive separate wrapping keys for each private key (key separation)
+    let wrapping = derive_wrapping_keys(&master_key)?;
+    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
+    let (encrypted_x25519_sk, x25519_nonce) =
+        aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
 
     // Create vault structure
     let vault = Vault {
@@ -117,19 +120,18 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     };
     let master_key = derive_key(passphrase, &kdf_config)?;
 
-    // Decrypt ML-KEM private key
-    let aes_key = master_key_to_aes_key(&master_key);
+    // Derive separate wrapping keys and decrypt private keys
+    let wrapping = derive_wrapping_keys(&master_key)?;
     let mlkem_sk_bytes = aes_decrypt(
-        &aes_key,
+        &wrapping.mlkem,
         &vault.kem.encrypted_private_key,
         vault.kem.private_key_nonce.as_slice().try_into()?,
     )
     .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?;
     let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes)?;
 
-    // Decrypt X25519 private key
     let x25519_sk_bytes = aes_decrypt(
-        &aes_key,
+        &wrapping.x25519,
         &vault.x25519.encrypted_private_key,
         vault.x25519.private_key_nonce.as_slice().try_into()?,
     )
@@ -206,12 +208,12 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
     };
 
     let master_key = derive_key(new_passphrase, &kdf_config)?;
-    let aes_key = master_key_to_aes_key(&master_key);
+    let wrapping = derive_wrapping_keys(&master_key)?;
 
     let (encrypted_mlkem_sk, mlkem_nonce) =
-        aes_encrypt(&aes_key, unlocked.mlkem_private.as_bytes())?;
+        aes_encrypt(&wrapping.mlkem, unlocked.mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
-        aes_encrypt(&aes_key, unlocked.x25519_private.as_bytes())?;
+        aes_encrypt(&wrapping.x25519, unlocked.x25519_private.as_bytes())?;
 
     unlocked.vault.kdf.salt = kdf_config.salt;
     unlocked.vault.kdf.time_cost = kdf_config.time_cost;
@@ -260,11 +262,11 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     unlocked.x25519_private = x25519_private;
 
     let master_key = derive_key(passphrase, &kdf_config)?;
-    let aes_key = master_key_to_aes_key(&master_key);
+    let wrapping = derive_wrapping_keys(&master_key)?;
     let (encrypted_mlkem_sk, mlkem_nonce) =
-        aes_encrypt(&aes_key, unlocked.mlkem_private.as_bytes())?;
+        aes_encrypt(&wrapping.mlkem, unlocked.mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
-        aes_encrypt(&aes_key, unlocked.x25519_private.as_bytes())?;
+        aes_encrypt(&wrapping.x25519, unlocked.x25519_private.as_bytes())?;
 
     unlocked.vault.kem.encrypted_private_key = encrypted_mlkem_sk;
     unlocked.vault.kem.private_key_nonce = mlkem_nonce.to_vec();
@@ -392,9 +394,38 @@ fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     Ok(())
 }
 
-/// Convert MasterKey to AesKey (helper for type conversion)
-fn master_key_to_aes_key(mk: &MasterKey) -> crate::crypto::AesKey {
-    crate::crypto::AesKey::from_bytes(*mk.as_bytes())
+/// Wrapping keys derived from the master key via HKDF-Expand with purpose labels.
+/// Provides cryptographic domain separation: each private key is encrypted under
+/// a distinct wrapping key even though both are derived from the same master key.
+struct WrappingKeys {
+    mlkem: AesKey,
+    x25519: AesKey,
+}
+
+/// Purpose labels for HKDF-Expand key derivation (domain separation)
+const WRAP_LABEL_MLKEM: &[u8] = b"dota-v4-wrap-mlkem";
+const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
+
+/// Derive separate wrapping keys for ML-KEM and X25519 private key encryption.
+///
+/// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
+/// a high-quality PRF output) with distinct purpose labels.
+fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
+    let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())
+        .map_err(|_| anyhow::anyhow!("master key too short for HKDF-Expand PRK"))?;
+
+    let mut mlkem_key = [0u8; 32];
+    hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
+        .map_err(|e| anyhow::anyhow!("HKDF expand for ML-KEM wrapping key failed: {}", e))?;
+
+    let mut x25519_key = [0u8; 32];
+    hk.expand(WRAP_LABEL_X25519, &mut x25519_key)
+        .map_err(|e| anyhow::anyhow!("HKDF expand for X25519 wrapping key failed: {}", e))?;
+
+    Ok(WrappingKeys {
+        mlkem: AesKey::from_bytes(mlkem_key),
+        x25519: AesKey::from_bytes(x25519_key),
+    })
 }
 
 #[cfg(test)]

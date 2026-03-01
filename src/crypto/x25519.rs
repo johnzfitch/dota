@@ -79,8 +79,11 @@ pub fn diffie_hellman(
     let shared_secret = secret.diffie_hellman(&public);
 
     let shared_bytes = shared_secret.to_bytes();
+    // Constant-time zero check: bitwise OR fold visits every byte without
+    // short-circuiting, then a single comparison at the end.
+    let is_nonzero = shared_bytes.iter().fold(0u8, |acc, &b| acc | b);
     anyhow::ensure!(
-        shared_bytes.iter().any(|&b| b != 0),
+        is_nonzero != 0,
         "X25519 DH produced all-zero shared secret (small-subgroup public key)"
     );
 
