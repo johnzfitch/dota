@@ -1,15 +1,14 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
 use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
+use super::migrate;
 use crate::crypto::{
-    AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
-    X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
-    hybrid_decapsulate, hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
+    KdfConfig, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey, X25519PrivateKey, X25519PublicKey,
+    aes_decrypt, aes_encrypt, derive_key, generate_salt, hybrid_decapsulate, hybrid_encapsulate,
+    mlkem_generate_keypair, x25519_generate_keypair,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use hkdf::Hkdf;
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -55,7 +54,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     let (x25519_public, x25519_private) = x25519_generate_keypair();
 
     // Derive separate wrapping keys for each private key (key separation)
-    let wrapping = derive_wrapping_keys(&master_key)?;
+    let wrapping = migrate::derive_wrapping_keys(&master_key, VAULT_VERSION)?;
     let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
         aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
@@ -63,6 +62,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     // Create vault structure
     let vault = Vault {
         version: VAULT_VERSION,
+        min_version: VAULT_VERSION,
         created: Utc::now(),
         kdf: KdfParams {
             algorithm: "argon2id".to_string(),
@@ -96,20 +96,18 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Unlock a vault with a passphrase
+/// Unlock a vault with a passphrase.
+///
+/// If the vault is at an older (but supported) version, it is automatically
+/// migrated to `VAULT_VERSION`. A backup of the pre-migration vault is
+/// written to `<vault_path>.v<old>.bak` before any changes are persisted.
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
     // Read and parse vault file
     let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
-    let vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
+    let mut vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
 
-    // Check version
-    if vault.version != VAULT_VERSION {
-        anyhow::bail!(
-            "Unsupported vault version: {} (expected {})",
-            vault.version,
-            VAULT_VERSION
-        );
-    }
+    // Validate version range (anti-downgrade + too-old checks)
+    migrate::validate_version(&vault)?;
 
     // Derive master key from passphrase
     let kdf_config = KdfConfig {
@@ -120,8 +118,29 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     };
     let master_key = derive_key(passphrase, &kdf_config)?;
 
-    // Derive separate wrapping keys and decrypt private keys
-    let wrapping = derive_wrapping_keys(&master_key)?;
+    // Auto-migrate if vault is at an older supported version
+    if migrate::needs_migration(&vault) {
+        let old_version = vault.version;
+
+        // Create backup before migration — atomic create, never overwrite,
+        // refuse to follow symlinks (mirrors save_vault_file protections).
+        let backup_path = create_backup(vault_path, old_version)?;
+
+        migrate::migrate_vault(&mut vault, &master_key)
+            .context("Vault migration failed (backup preserved)")?;
+
+        // Persist migrated vault atomically
+        save_vault_file(vault_path, &vault)?;
+
+        eprintln!(
+            "Vault migrated v{} → v{} (backup: {})",
+            old_version, vault.version, backup_path
+        );
+    }
+
+    // Derive wrapping keys for the (now-current) vault version
+    let wrapping = migrate::derive_wrapping_keys(&master_key, vault.version)?;
+
     let mlkem_sk_bytes = aes_decrypt(
         &wrapping.mlkem,
         &vault.kem.encrypted_private_key,
@@ -208,7 +227,7 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
     };
 
     let master_key = derive_key(new_passphrase, &kdf_config)?;
-    let wrapping = derive_wrapping_keys(&master_key)?;
+    let wrapping = migrate::derive_wrapping_keys(&master_key, VAULT_VERSION)?;
 
     let (encrypted_mlkem_sk, mlkem_nonce) =
         aes_encrypt(&wrapping.mlkem, unlocked.mlkem_private.as_bytes())?;
@@ -262,7 +281,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     unlocked.x25519_private = x25519_private;
 
     let master_key = derive_key(passphrase, &kdf_config)?;
-    let wrapping = derive_wrapping_keys(&master_key)?;
+    let wrapping = migrate::derive_wrapping_keys(&master_key, VAULT_VERSION)?;
     let (encrypted_mlkem_sk, mlkem_nonce) =
         aes_encrypt(&wrapping.mlkem, unlocked.mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
@@ -365,6 +384,58 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
     Ok(())
 }
 
+/// Create a pre-migration backup of the vault file.
+///
+/// Uses `O_CREAT | O_EXCL` semantics to atomically create the backup (no
+/// TOCTOU race), refuses to follow symlinks at the backup path, and tries
+/// sequential suffixes if the base name is already taken.
+fn create_backup(vault_path: &str, old_version: u32) -> Result<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let candidates = (0u32..).map(|i| {
+        if i == 0 {
+            format!("{}.v{}.bak", vault_path, old_version)
+        } else {
+            format!("{}.v{}.bak.{}", vault_path, old_version, i)
+        }
+    });
+
+    for candidate in candidates.take(1000) {
+        let p = Path::new(&candidate);
+
+        // Refuse symlinks at the backup destination
+        if let Ok(meta) = fs::symlink_metadata(p) {
+            if meta.file_type().is_symlink() {
+                continue; // skip symlinks, try next suffix
+            }
+        }
+
+        // Atomically create-or-fail (O_CREAT | O_EXCL equivalent)
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(p)
+        {
+            Ok(mut f) => {
+                // Write vault contents to the exclusively created file
+                let data = fs::read(vault_path).context("Failed to read vault for backup")?;
+                f.write_all(&data)
+                    .context("Failed to write backup data")?;
+                f.sync_all().context("Failed to sync backup file")?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(
+                    anyhow::anyhow!(e).context(format!("Failed to create backup at {}", candidate))
+                );
+            }
+        }
+    }
+    anyhow::bail!("Could not create backup: too many existing backup files")
+}
+
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
 fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
@@ -392,40 +463,6 @@ fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
         .context("Failed to persist vault file")?;
 
     Ok(())
-}
-
-/// Wrapping keys derived from the master key via HKDF-Expand with purpose labels.
-/// Provides cryptographic domain separation: each private key is encrypted under
-/// a distinct wrapping key even though both are derived from the same master key.
-struct WrappingKeys {
-    mlkem: AesKey,
-    x25519: AesKey,
-}
-
-/// Purpose labels for HKDF-Expand key derivation (domain separation)
-const WRAP_LABEL_MLKEM: &[u8] = b"dota-v4-wrap-mlkem";
-const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
-
-/// Derive separate wrapping keys for ML-KEM and X25519 private key encryption.
-///
-/// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
-/// a high-quality PRF output) with distinct purpose labels.
-fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
-    let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())
-        .map_err(|_| anyhow::anyhow!("master key too short for HKDF-Expand PRK"))?;
-
-    let mut mlkem_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
-        .map_err(|e| anyhow::anyhow!("HKDF expand for ML-KEM wrapping key failed: {}", e))?;
-
-    let mut x25519_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_X25519, &mut x25519_key)
-        .map_err(|e| anyhow::anyhow!("HKDF expand for X25519 wrapping key failed: {}", e))?;
-
-    Ok(WrappingKeys {
-        mlkem: AesKey::from_bytes(mlkem_key),
-        x25519: AesKey::from_bytes(x25519_key),
-    })
 }
 
 #[cfg(test)]

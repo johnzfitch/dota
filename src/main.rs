@@ -43,6 +43,9 @@ fn main() -> Result<()> {
         Some(Commands::RotateKeys) => {
             cli::commands::handle_rotate_keys(args.vault)?;
         }
+        Some(Commands::Upgrade) => {
+            cli::commands::handle_upgrade(args.vault)?;
+        }
         Some(Commands::Info) => {
             cli::commands::handle_info(args.vault)?;
         }

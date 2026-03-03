@@ -4,18 +4,35 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Vault file format version
+/// Current vault file format version.
 ///
+/// Version history:
+/// v3:       Initial stable format. Master key used directly as AES wrapping key.
 /// v3 → v4: Purpose-labeled HKDF-Expand for key wrapping (key separation).
 ///           The master key is no longer used directly as an AES key. Instead,
 ///           separate wrapping keys are derived via HKDF-Expand with distinct
 ///           purpose labels for ML-KEM and X25519 private key encryption.
-pub const VAULT_VERSION: u32 = 4;
+/// v4 → v5: Refreshed HKDF wrapping labels (v5-specific domain separation).
+///           Added min_version anti-rollback field. Automatic migration with
+///           backup. No downgrade path: once upgraded, older binaries refuse
+///           to open the vault.
+pub const VAULT_VERSION: u32 = 5;
+
+/// Minimum vault version that can be migrated forward to VAULT_VERSION.
+/// Vaults older than this require an intermediate binary version first.
+pub const MIN_SUPPORTED_VERSION: u32 = 3;
 
 /// Top-level vault structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vault {
     pub version: u32,
+    /// Anti-rollback floor: the minimum binary version required to open this
+    /// vault. Set to VAULT_VERSION on creation and on every migration. Older
+    /// binaries that do not understand this field will already fail on the
+    /// `version` check, but this provides an additional explicit safeguard
+    /// against targeted downgrade attacks.
+    #[serde(default)]
+    pub min_version: u32,
     pub created: DateTime<Utc>,
     pub kdf: KdfParams,
     pub kem: KemKeyPair,
@@ -102,6 +119,7 @@ mod tests {
     fn test_vault_serialization_round_trip() {
         let vault = Vault {
             version: VAULT_VERSION,
+            min_version: VAULT_VERSION,
             created: Utc::now(),
             kdf: KdfParams {
                 algorithm: "argon2id".to_string(),

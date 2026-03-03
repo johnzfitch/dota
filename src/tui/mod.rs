@@ -105,6 +105,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("─────────────────");
                 println!("Location:      {}", vault_path);
                 println!("Version:       {}", unlocked.vault.version);
+                println!("Min version:   {}", unlocked.vault.min_version);
                 println!(
                     "Created:       {}",
                     unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
