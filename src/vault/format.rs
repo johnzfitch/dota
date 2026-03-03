@@ -4,13 +4,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Minimum vault version we can still read (v4 vaults lack key_commitment
+/// and are auto-upgraded on next save).
+pub const MIN_VAULT_VERSION: u32 = 4;
+
 /// Vault file format version
 ///
 /// v3 → v4: Purpose-labeled HKDF-Expand for key wrapping (key separation).
 ///           The master key is no longer used directly as an AES key. Instead,
 ///           separate wrapping keys are derived via HKDF-Expand with distinct
 ///           purpose labels for ML-KEM and X25519 private key encryption.
-pub const VAULT_VERSION: u32 = 4;
+///
+/// v4 → v5: HMAC-SHA256 key commitment over KDF params + public keys.
+///           Detects tampering (KDF downgrade, key replacement) at unlock time
+///           before any decryption is attempted. Also migrated pqcrypto-kyber
+///           to pqcrypto-mlkem for FIPS 203 alignment.
+pub const VAULT_VERSION: u32 = 5;
 
 /// Top-level vault structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +27,14 @@ pub struct Vault {
     pub version: u32,
     pub created: DateTime<Utc>,
     pub kdf: KdfParams,
+    /// HMAC-SHA256 commitment over KDF params + public keys, keyed by master key.
+    /// Absent in v4 vaults (auto-added on next save).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_base64_serde"
+    )]
+    pub key_commitment: Option<Vec<u8>>,
     pub kem: KemKeyPair,
     pub x25519: X25519KeyPair,
     pub secrets: HashMap<String, EncryptedSecret>,
@@ -94,6 +111,33 @@ mod base64_serde {
     }
 }
 
+/// Helper module for optional base64-encoded fields
+mod opt_base64_serde {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => serializer.serialize_str(&STANDARD.encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => Ok(Some(STANDARD.decode(s).map_err(serde::de::Error::custom)?)),
+            None => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +154,7 @@ mod tests {
                 memory_cost: 65536,
                 parallelism: 4,
             },
+            key_commitment: Some(vec![0xAB; 32]),
             kem: KemKeyPair {
                 algorithm: "ML-KEM-768".to_string(),
                 public_key: vec![5; 1184],

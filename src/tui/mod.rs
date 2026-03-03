@@ -3,16 +3,20 @@
 
 pub mod app;
 
+use crate::security::{SecretString, shutdown_requested};
 use crate::vault::ops::{get_secret, list_secrets, remove_secret, set_secret, unlock_vault};
 use anyhow::Result;
 use rpassword::prompt_password;
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use zeroize::Zeroize;
 
 /// Launch the TUI application
 pub fn launch_tui(vault_path: String) -> Result<()> {
-    let passphrase = prompt_password("Vault passphrase: ")?;
-    let mut unlocked = unlock_vault(&passphrase, &vault_path)?;
+    // Wrap passphrase in SecretString — persists for session lifetime but
+    // will be zeroized when this function returns (including on signal exit).
+    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     println!("dota interactive mode");
     println!("Type 'help' for available commands.");
@@ -20,10 +24,20 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
     let stdin = io::stdin();
     let mut buffer = String::new();
     loop {
+        // Check for graceful shutdown (SIGTERM/SIGINT/SIGHUP)
+        if shutdown_requested() {
+            break;
+        }
+
         print!("dota> ");
         io::stdout().flush()?;
-        buffer.clear();
-        stdin.read_line(&mut buffer)?;
+
+        // Zeroize the buffer properly: clear() only resets length, not memory.
+        // We zeroize the underlying bytes first, then clear.
+        buffer.zeroize();
+        if stdin.read_line(&mut buffer).is_err() {
+            break; // EOF or read error (e.g. EINTR from signal)
+        }
         let line = buffer.trim();
 
         if line.is_empty() {
@@ -60,7 +74,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 let name = parts.pop_front();
                 if let Some(name) = name {
                     match get_secret(&unlocked, name) {
-                        Ok(value) => println!("{}", value),
+                        Ok(value) => println!("{}", value.expose()),
                         Err(e) => println!("error: {}", e),
                     }
                 } else {
@@ -70,7 +84,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             "set" => {
                 let name = parts.pop_front();
                 if let Some(name) = name {
-                    let value = if let Some(v) = parts.pop_front() {
+                    let value = SecretString::new(if let Some(v) = parts.pop_front() {
                         let mut merged = v.to_string();
                         while let Some(part) = parts.pop_front() {
                             merged.push(' ');
@@ -79,9 +93,9 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                         merged
                     } else {
                         prompt_password(format!("Enter value for '{}': ", name))?
-                    };
+                    });
 
-                    match set_secret(&mut unlocked, name, &value) {
+                    match set_secret(&mut unlocked, name, value.expose()) {
                         Ok(_) => println!("Secret '{}' saved", name),
                         Err(e) => println!("error: {}", e),
                     }
@@ -127,11 +141,13 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             "export" => {
                 for name in list_secrets(&unlocked) {
                     if let Ok(value) = get_secret(&unlocked, &name) {
-                        println!("export {}={}", name, shell_escape(&value));
+                        let mut escaped = shell_escape(value.expose());
+                        println!("export {}={}", name, escaped);
+                        escaped.zeroize();
                     }
                 }
             }
-            "refresh" => match unlock_vault(&passphrase, &vault_path) {
+            "refresh" => match unlock_vault(passphrase.expose(), &vault_path) {
                 Ok(fresh) => {
                     unlocked = fresh;
                     println!("Refreshed vault from disk");
@@ -146,7 +162,10 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             }
         }
     }
+    // Zeroize the input buffer on exit
+    buffer.zeroize();
 
+    // All SecretStrings (passphrase, values) are zeroized here via drop.
     Ok(())
 }
 

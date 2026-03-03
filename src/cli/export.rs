@@ -1,16 +1,18 @@
 //! Export secrets as shell environment variables
 
+use crate::security::SecretString;
 use crate::vault::ops::{default_vault_path, get_secret, list_secrets, unlock_vault};
 use anyhow::Result;
 use rpassword::prompt_password;
+use zeroize::Zeroize;
 
 /// Handle 'export-env' command
 pub fn handle_export_env(vault_path: Option<String>, names: Vec<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = prompt_password("Vault passphrase: ")?;
-    let unlocked = unlock_vault(&passphrase, &vault_path)?;
+    // Unlock vault — passphrase zeroized on drop
+    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     // Determine which secrets to export
     let export_names = if names.is_empty() {
@@ -31,11 +33,13 @@ pub fn handle_export_env(vault_path: Option<String>, names: Vec<String>) -> Resu
 
         match get_secret(&unlocked, &name) {
             Ok(value) => {
-                // Shell-escape the value
-                let escaped = shell_escape(&value);
+                // Shell-escape the value — escaped copy is also zeroized
+                let mut escaped = shell_escape(value.expose());
                 // Note: name is already validated by is_shell_var_name to contain only
                 // [A-Za-z_][A-Za-z0-9_]*, so it's safe to use directly without quoting
                 println!("export {}={}", name, escaped);
+                // Zeroize the escaped copy before it drops
+                escaped.zeroize();
             }
             Err(e) => {
                 eprintln!("# Warning: Failed to get secret '{}': {}", name, e);

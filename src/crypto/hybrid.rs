@@ -90,7 +90,11 @@ fn combine_shared_secrets(
     ikm.zeroize();
 
     result?;
-    Ok(AesKey::from_bytes(okm))
+    let key = AesKey::from_bytes(okm);
+    // Zeroize the stack buffer — data now lives inside AesKey (ZeroizeOnDrop)
+    okm.zeroize();
+    std::hint::black_box(&okm);
+    Ok(key)
 }
 
 #[cfg(test)]
