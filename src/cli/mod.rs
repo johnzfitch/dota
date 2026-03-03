@@ -62,6 +62,9 @@ pub enum Commands {
     /// Rotate encryption keys (re-encrypt all secrets)
     RotateKeys,
 
+    /// Upgrade vault to the latest format version (no downgrade)
+    Upgrade,
+
     /// Show vault information
     Info,
 }

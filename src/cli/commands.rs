@@ -4,7 +4,7 @@ use crate::vault::ops::{
     change_passphrase, create_vault, default_vault_path, get_secret, list_secrets, remove_secret,
     rotate_keys, set_secret, unlock_vault,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rpassword::prompt_password;
 
 /// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
@@ -167,6 +167,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     println!("─────────────────");
     println!("Location:      {}", vault_path);
     println!("Version:       {}", unlocked.vault.version);
+    println!("Min version:   {}", unlocked.vault.min_version);
     println!(
         "Created:       {}",
         unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
@@ -231,6 +232,48 @@ pub fn handle_rotate_keys(vault_path: Option<String>) -> Result<()> {
     // Perform key rotation
     rotate_keys(&mut unlocked, &passphrase)?;
     println!("Vault keys rotated successfully");
+
+    Ok(())
+}
+
+/// Handle 'upgrade' command — explicitly migrate a vault to the latest version.
+///
+/// This is the same migration that `unlock` performs automatically, but
+/// exposed as a standalone command for operators who want to upgrade vaults
+/// in a controlled manner (e.g. before deploying a new binary fleet-wide).
+pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
+    use crate::vault::format::VAULT_VERSION;
+    use crate::vault::migrate;
+
+    let vault_path = vault_path.unwrap_or_else(default_vault_path);
+
+    // Read vault to check version before prompting for passphrase
+    let json =
+        std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
+    let vault: crate::vault::format::Vault =
+        serde_json::from_str(&json).context("Failed to parse vault file")?;
+
+    // Validate version range (catches corrupt min_version, future versions, etc.)
+    migrate::validate_version(&vault)?;
+
+    if !migrate::needs_migration(&vault) {
+        println!(
+            "Vault is already at the latest version (v{}). No upgrade needed.",
+            VAULT_VERSION
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Vault is at v{}, latest is v{}. Upgrading...",
+        vault.version, VAULT_VERSION
+    );
+
+    // unlock_vault handles backup, migration, and persistence
+    let passphrase = read_passphrase("Vault passphrase: ")?;
+    let _unlocked = unlock_vault(&passphrase, &vault_path)?;
+
+    println!("Vault upgraded successfully to v{}", VAULT_VERSION);
 
     Ok(())
 }
