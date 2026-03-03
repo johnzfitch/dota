@@ -158,6 +158,12 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
                  (KDF parameters or public keys were modified), or wrong passphrase"
             );
         }
+    } else if vault.version >= 5 {
+        anyhow::bail!(
+            "Vault version {} requires a key commitment, but none was found — \
+             vault file may have been tampered with",
+            vault.version
+        );
     }
 
     // Derive separate wrapping keys and decrypt private keys
@@ -661,6 +667,30 @@ mod tests {
 
         let names = list_secrets(&unlocked);
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
+    }
+
+    #[test]
+    fn test_v5_vault_rejects_stripped_key_commitment() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Create a v5 vault with a valid key commitment
+        create_vault("test-pass", vault_path).unwrap();
+
+        // Tamper: strip the key_commitment field from the vault file
+        let json = std::fs::read_to_string(vault_path).unwrap();
+        let mut raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        raw.as_object_mut().unwrap().remove("key_commitment");
+        assert_eq!(raw["version"], 5);
+        std::fs::write(vault_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        // Unlock must fail — missing commitment on a v5 vault is tamper evidence
+        let err = unlock_vault("test-pass", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a key commitment"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
