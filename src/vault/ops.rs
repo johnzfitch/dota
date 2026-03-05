@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -83,6 +84,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
             private_key_nonce: x25519_nonce.to_vec(),
         },
         secrets: HashMap::new(),
+        migrated_from: None,
     };
 
     // Create parent directory if needed
@@ -98,18 +100,27 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
-    // Read and parse vault file
+    // Read and parse vault file, migrating if needed
     let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
-    let vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
 
-    // Check version
-    if vault.version != VAULT_VERSION {
+    let probe: super::legacy::VaultVersionProbe =
+        serde_json::from_str(&json).context("Failed to parse vault version")?;
+
+    let vault: Vault = if probe.version == VAULT_VERSION {
+        serde_json::from_str(&json).context("Failed to parse vault file")?
+    } else if probe.version < VAULT_VERSION {
+        eprintln!(
+            "Migrating vault from v{} to v{}...",
+            probe.version, VAULT_VERSION
+        );
+        super::migration::upvault(&json, passphrase, vault_path)?
+    } else {
         anyhow::bail!(
-            "Unsupported vault version: {} (expected {})",
-            vault.version,
+            "Vault version {} is newer than supported (v{}). Please update dota.",
+            probe.version,
             VAULT_VERSION
         );
-    }
+    };
 
     // Derive master key from passphrase
     let kdf_config = KdfConfig {
@@ -122,20 +133,24 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
 
     // Derive separate wrapping keys and decrypt private keys
     let wrapping = derive_wrapping_keys(&master_key)?;
-    let mlkem_sk_bytes = aes_decrypt(
-        &wrapping.mlkem,
-        &vault.kem.encrypted_private_key,
-        vault.kem.private_key_nonce.as_slice().try_into()?,
-    )
-    .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?;
-    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes)?;
+    let mlkem_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &wrapping.mlkem,
+            &vault.kem.encrypted_private_key,
+            vault.kem.private_key_nonce.as_slice().try_into()?,
+        )
+        .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?,
+    );
+    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
 
-    let x25519_sk_bytes = aes_decrypt(
-        &wrapping.x25519,
-        &vault.x25519.encrypted_private_key,
-        vault.x25519.private_key_nonce.as_slice().try_into()?,
-    )
-    .context("Failed to decrypt X25519 private key (wrong passphrase?)")?;
+    let x25519_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &wrapping.x25519,
+            &vault.x25519.encrypted_private_key,
+            vault.x25519.private_key_nonce.as_slice().try_into()?,
+        )
+        .context("Failed to decrypt X25519 private key (wrong passphrase?)")?,
+    );
     let x25519_private = X25519PrivateKey::from_bytes(
         x25519_sk_bytes
             .as_slice()
@@ -241,7 +256,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     };
 
     let existing_names = list_secrets(unlocked);
-    let mut secrets: Vec<(String, String, chrono::DateTime<Utc>)> =
+    let mut secrets: Vec<(String, Zeroizing<String>, chrono::DateTime<Utc>)> =
         Vec::with_capacity(existing_names.len());
     for name in &existing_names {
         let entry = unlocked
@@ -250,7 +265,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
             .get(name)
             .with_context(|| format!("Secret '{}' missing during rotation", name))?;
         let plaintext = get_secret(unlocked, name)?;
-        secrets.push((name.clone(), plaintext, entry.created));
+        secrets.push((name.clone(), Zeroizing::new(plaintext), entry.created));
     }
 
     let (mlkem_public, mlkem_private) = mlkem_generate_keypair()?;
@@ -334,11 +349,12 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<String> {
         &x25519_eph_pk,
     )?;
 
-    // Decrypt the secret value
+    // Decrypt the secret value (zeroize raw bytes after conversion)
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
-    let plaintext = aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?;
-
-    String::from_utf8(plaintext).context("Secret contains invalid UTF-8")
+    let mut plaintext = aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?;
+    let result = String::from_utf8(plaintext.clone()).context("Secret contains invalid UTF-8");
+    plaintext.zeroize();
+    result
 }
 
 /// Remove a secret from the vault
@@ -366,7 +382,7 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 }
 
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
-fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
+pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
     if let Ok(meta) = fs::symlink_metadata(vault_path)
         && meta.file_type().is_symlink()
@@ -397,9 +413,9 @@ fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
 /// Wrapping keys derived from the master key via HKDF-Expand with purpose labels.
 /// Provides cryptographic domain separation: each private key is encrypted under
 /// a distinct wrapping key even though both are derived from the same master key.
-struct WrappingKeys {
-    mlkem: AesKey,
-    x25519: AesKey,
+pub(crate) struct WrappingKeys {
+    pub(crate) mlkem: AesKey,
+    pub(crate) x25519: AesKey,
 }
 
 /// Purpose labels for HKDF-Expand key derivation (domain separation)
@@ -410,21 +426,21 @@ const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
 ///
 /// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
-fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
+pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())
         .map_err(|_| anyhow::anyhow!("master key too short for HKDF-Expand PRK"))?;
 
-    let mut mlkem_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
+    let mut mlkem_key = Zeroizing::new([0u8; 32]);
+    hk.expand(WRAP_LABEL_MLKEM, mlkem_key.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expand for ML-KEM wrapping key failed: {}", e))?;
 
-    let mut x25519_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_X25519, &mut x25519_key)
+    let mut x25519_key = Zeroizing::new([0u8; 32]);
+    hk.expand(WRAP_LABEL_X25519, x25519_key.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expand for X25519 wrapping key failed: {}", e))?;
 
     Ok(WrappingKeys {
-        mlkem: AesKey::from_bytes(mlkem_key),
-        x25519: AesKey::from_bytes(x25519_key),
+        mlkem: AesKey::from_bytes(*mlkem_key),
+        x25519: AesKey::from_bytes(*x25519_key),
     })
 }
 

@@ -186,6 +186,25 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     println!("Encryption:    AES-256-GCM");
     println!("Key Derivation: HKDF-SHA256");
 
+    if let Some(ref info) = unlocked.vault.migrated_from {
+        println!();
+        println!("Migration");
+        println!("─────────────────");
+        println!("Original version: v{}", info.original_version);
+        println!(
+            "Migrated at:      {}",
+            info.migrated_at.format("%Y-%m-%d %H:%M:%S")
+        );
+        println!(
+            "Migration path:   {}",
+            info.migration_path
+                .iter()
+                .map(|v| format!("v{}", v))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
+
     Ok(())
 }
 

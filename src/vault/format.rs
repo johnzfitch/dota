@@ -6,11 +6,12 @@ use std::collections::HashMap;
 
 /// Vault file format version
 ///
-/// v3 → v4: Purpose-labeled HKDF-Expand for key wrapping (key separation).
-///           The master key is no longer used directly as an AES key. Instead,
-///           separate wrapping keys are derived via HKDF-Expand with distinct
-///           purpose labels for ML-KEM and X25519 private key encryption.
-pub const VAULT_VERSION: u32 = 4;
+/// v1: X25519 only, master key used directly as AES key, no ML-KEM
+/// v2: Added hybrid KEM (ML-KEM-768 + X25519), flat field layout
+/// v3: Nested struct layout (KemKeyPair, X25519KeyPair), same crypto as v2
+/// v4: Purpose-labeled HKDF-Expand for key wrapping (key separation)
+/// v5: Added migration metadata (migrated_from field)
+pub const VAULT_VERSION: u32 = 5;
 
 /// Top-level vault structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,16 @@ pub struct Vault {
     pub kem: KemKeyPair,
     pub x25519: X25519KeyPair,
     pub secrets: HashMap<String, EncryptedSecret>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub migrated_from: Option<MigrationInfo>,
+}
+
+/// Tracks vault migration history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationInfo {
+    pub original_version: u32,
+    pub migrated_at: DateTime<Utc>,
+    pub migration_path: Vec<u32>,
 }
 
 /// KDF parameters for passphrase derivation
@@ -74,7 +85,7 @@ pub struct EncryptedSecret {
 }
 
 /// Helper module for base64 serialization
-mod base64_serde {
+pub(crate) mod base64_serde {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -122,6 +133,7 @@ mod tests {
                 private_key_nonce: vec![10; 12],
             },
             secrets: HashMap::new(),
+            migrated_from: None,
         };
 
         let json = serde_json::to_string_pretty(&vault).unwrap();
