@@ -13,7 +13,7 @@ use super::format::{
     EncryptedSecret, KemKeyPair, MigrationInfo, Vault, VAULT_VERSION, X25519KeyPair,
 };
 use super::legacy::{VaultV1, VaultV2, VaultV3, VaultVersionProbe};
-use super::ops::{derive_wrapping_keys, save_vault_file};
+use super::ops::{compute_key_commitment, derive_wrapping_keys, save_vault_file};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, aes_decrypt, aes_encrypt, derive_key, hybrid_encapsulate,
     mlkem_generate_keypair, MlKemPublicKey, X25519PrivateKey, X25519PublicKey,
@@ -63,7 +63,6 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
     let migration_path: Vec<u32> = (probe.version..=VAULT_VERSION).collect();
 
     // Run the stepwise upvault chain. Each step converts vN → vN+1 in memory.
-    // We use an enum to track intermediate state through the chain.
     let vault = match probe.version {
         1 => {
             let v1: VaultV1 =
@@ -71,25 +70,25 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v2 = upvault_v1(v1, &master_key)?;
             let v3 = upvault_v2(v2)?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path)?
+            upvault_v4(v4, probe.version, &migration_path, &master_key)?
         }
         2 => {
             let v2: VaultV2 =
                 serde_json::from_str(original_json).context("Failed to parse v2 vault")?;
             let v3 = upvault_v2(v2)?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path)?
+            upvault_v4(v4, probe.version, &migration_path, &master_key)?
         }
         3 => {
             let v3: VaultV3 =
                 serde_json::from_str(original_json).context("Failed to parse v3 vault")?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path)?
+            upvault_v4(v4, probe.version, &migration_path, &master_key)?
         }
         4 => {
             let v4: Vault =
                 serde_json::from_str(original_json).context("Failed to parse v4 vault")?;
-            upvault_v4(v4, probe.version, &migration_path)?
+            upvault_v4(v4, probe.version, &migration_path, &master_key)?
         }
         _ => bail!("Unsupported vault version: {}", probe.version),
     };
@@ -268,6 +267,7 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
         version: 4,
         created: v3.created,
         kdf: v3.kdf,
+        key_commitment: None, // Will be set by upvault_v4
         kem: KemKeyPair {
             algorithm: v3.kem.algorithm,
             public_key: v3.kem.public_key,
@@ -281,16 +281,25 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
         },
         secrets: v3.secrets,
         migrated_from: None, // Will be set by upvault_v4
+        min_version: 0,      // Will be set by upvault_v4
     })
 }
 
-/// v4 → v5: Add migration metadata (no crypto changes)
+/// v4 → v5: Add key commitment, migration metadata, and anti-rollback
 fn upvault_v4(
     mut v4: Vault,
     original_version: u32,
     migration_path: &[u32],
+    master_key: &MasterKey,
 ) -> Result<Vault> {
     v4.version = 5;
+    v4.key_commitment = Some(compute_key_commitment(
+        master_key,
+        &v4.kdf,
+        &v4.kem.public_key,
+        &v4.x25519.public_key,
+    ));
+    v4.min_version = VAULT_VERSION;
     v4.migrated_from = Some(MigrationInfo {
         original_version,
         migrated_at: Utc::now(),
@@ -339,13 +348,13 @@ fn create_backup(vault_path: &str) -> Result<()> {
     let backup_path = parent.join(&backup_name);
 
     // Symlink protection: refuse to write through a symlink
-    if let Ok(meta) = fs::symlink_metadata(&backup_path) {
-        if meta.file_type().is_symlink() {
-            bail!(
-                "Refusing to write backup through symlink: {}",
-                backup_path.display()
-            );
-        }
+    if let Ok(meta) = fs::symlink_metadata(&backup_path)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "Refusing to write backup through symlink: {}",
+            backup_path.display()
+        );
     }
 
     fs::copy(vault_path, &backup_path)
@@ -367,10 +376,11 @@ fn find_backups(
     let mut backups = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(&prefix) && name.ends_with(&suffix) {
-                    backups.push(name.to_string());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(&prefix)
+                && name.ends_with(&suffix)
+            {
+                backups.push(name.to_string());
             }
         }
     }

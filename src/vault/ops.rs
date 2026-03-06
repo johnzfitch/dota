@@ -1,11 +1,14 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
-use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
+use super::format::{
+    EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair,
+};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
     hybrid_decapsulate, hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
 };
+use crate::security::{self, SecretString, SecretVec};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hkdf::Hkdf;
@@ -14,7 +17,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -27,6 +30,15 @@ pub fn default_vault_path() -> String {
 }
 
 /// Unlocked vault with decrypted keypairs
+impl std::fmt::Debug for UnlockedVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockedVault")
+            .field("vault_version", &self.vault.version)
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct UnlockedVault {
     pub vault: Vault,
     pub mlkem_private: MlKemPrivateKey,
@@ -61,17 +73,29 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     let (encrypted_x25519_sk, x25519_nonce) =
         aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
 
+    // Build KDF params for commitment
+    let kdf_params = KdfParams {
+        algorithm: "argon2id".to_string(),
+        salt,
+        time_cost: kdf_config.time_cost,
+        memory_cost: kdf_config.memory_cost,
+        parallelism: kdf_config.parallelism,
+    };
+
+    // Compute key commitment
+    let commitment = compute_key_commitment(
+        &master_key,
+        &kdf_params,
+        mlkem_public.as_bytes(),
+        x25519_public.as_bytes(),
+    );
+
     // Create vault structure
     let vault = Vault {
         version: VAULT_VERSION,
         created: Utc::now(),
-        kdf: KdfParams {
-            algorithm: "argon2id".to_string(),
-            salt,
-            time_cost: kdf_config.time_cost,
-            memory_cost: kdf_config.memory_cost,
-            parallelism: kdf_config.parallelism,
-        },
+        kdf: kdf_params,
+        key_commitment: Some(commitment),
         kem: KemKeyPair {
             algorithm: "ML-KEM-768".to_string(),
             public_key: mlkem_public.as_bytes().to_vec(),
@@ -85,6 +109,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         },
         secrets: HashMap::new(),
         migrated_from: None,
+        min_version: VAULT_VERSION,
     };
 
     // Create parent directory if needed
@@ -130,6 +155,29 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
         parallelism: vault.kdf.parallelism,
     };
     let master_key = derive_key(passphrase, &kdf_config)?;
+
+    // Verify key commitment (v5+). v4 vaults lack this field and are
+    // accepted without verification — they get upgraded by the migration path.
+    if let Some(ref stored_commitment) = vault.key_commitment {
+        let expected = compute_key_commitment(
+            &master_key,
+            &vault.kdf,
+            &vault.kem.public_key,
+            &vault.x25519.public_key,
+        );
+        if !security::constant_time_eq(stored_commitment, &expected) {
+            anyhow::bail!(
+                "Key commitment mismatch — vault may have been tampered with \
+                 (KDF parameters or public keys were modified), or wrong passphrase"
+            );
+        }
+    } else if vault.version >= 5 {
+        anyhow::bail!(
+            "Vault version {} requires a key commitment, but none was found — \
+             vault file may have been tampered with",
+            vault.version
+        );
+    }
 
     // Derive separate wrapping keys and decrypt private keys
     let wrapping = derive_wrapping_keys(&master_key)?;
@@ -240,6 +288,16 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
     unlocked.vault.x25519.encrypted_private_key = encrypted_x25519_sk;
     unlocked.vault.x25519.private_key_nonce = x25519_nonce.to_vec();
 
+    // Recompute key commitment with new master key
+    unlocked.vault.key_commitment = Some(compute_key_commitment(
+        &master_key,
+        &unlocked.vault.kdf,
+        &unlocked.vault.kem.public_key,
+        &unlocked.vault.x25519.public_key,
+    ));
+    unlocked.vault.version = VAULT_VERSION;
+    unlocked.vault.min_version = VAULT_VERSION;
+
     save_vault(unlocked)?;
 
     Ok(())
@@ -256,7 +314,8 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     };
 
     let existing_names = list_secrets(unlocked);
-    let mut secrets: Vec<(String, Zeroizing<String>, chrono::DateTime<Utc>)> =
+    // Collect all plaintext secrets into SecretStrings for automatic zeroization.
+    let mut secrets: Vec<(String, SecretString, chrono::DateTime<Utc>)> =
         Vec::with_capacity(existing_names.len());
     for name in &existing_names {
         let entry = unlocked
@@ -265,7 +324,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
             .get(name)
             .with_context(|| format!("Secret '{}' missing during rotation", name))?;
         let plaintext = get_secret(unlocked, name)?;
-        secrets.push((name.clone(), Zeroizing::new(plaintext), entry.created));
+        secrets.push((name.clone(), plaintext, entry.created));
     }
 
     let (mlkem_public, mlkem_private) = mlkem_generate_keypair()?;
@@ -289,6 +348,16 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     unlocked.vault.x25519.private_key_nonce = x25519_nonce.to_vec();
     unlocked.vault.kdf.salt = kdf_config.salt;
 
+    // Recompute key commitment with new keys and master key
+    unlocked.vault.key_commitment = Some(compute_key_commitment(
+        &master_key,
+        &unlocked.vault.kdf,
+        &unlocked.vault.kem.public_key,
+        &unlocked.vault.x25519.public_key,
+    ));
+    unlocked.vault.version = VAULT_VERSION;
+    unlocked.vault.min_version = VAULT_VERSION;
+
     unlocked.vault.secrets.clear();
     let mlkem_public = MlKemPublicKey::from_bytes(unlocked.vault.kem.public_key.clone())?;
     let x25519_public = X25519PublicKey::from_bytes(
@@ -301,30 +370,35 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
             .context("Invalid X25519 public key length")?,
     );
 
-    for (name, plaintext, created) in secrets {
+    for (name, plaintext, created) in &secrets {
         let encap = hybrid_encapsulate(&mlkem_public, &x25519_public)?;
-        let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, plaintext.as_bytes())?;
+        let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, plaintext.expose().as_bytes())?;
 
         unlocked.vault.secrets.insert(
-            name,
+            name.clone(),
             EncryptedSecret {
                 algorithm: "hybrid-mlkem768-x25519".to_string(),
                 kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
                 x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
                 nonce: nonce.to_vec(),
                 ciphertext,
-                created,
+                created: *created,
                 modified: Utc::now(),
             },
         );
     }
+    // `secrets` Vec<(String, SecretString, ...)> drops here — each
+    // SecretString is zeroized via ZeroizeOnDrop.
 
     save_vault(unlocked)?;
     Ok(())
 }
 
-/// Get a secret from the vault
-pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<String> {
+/// Get a secret from the vault.
+///
+/// Returns a `SecretString` that is automatically zeroized on drop,
+/// preventing the plaintext from lingering on the heap.
+pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> {
     let encrypted = unlocked
         .vault
         .secrets
@@ -349,12 +423,13 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<String> {
         &x25519_eph_pk,
     )?;
 
-    // Decrypt the secret value (zeroize raw bytes after conversion)
+    // Decrypt the secret value — wrap in SecretVec for zeroization
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
-    let mut plaintext = aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?;
-    let result = String::from_utf8(plaintext.clone()).context("Secret contains invalid UTF-8");
-    plaintext.zeroize();
-    result
+    let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
+
+    // Convert to String, consuming the SecretVec (inner bytes zeroized on drop)
+    let s = String::from_utf8(plaintext.into_inner()).context("Secret contains invalid UTF-8")?;
+    Ok(SecretString::new(s))
 }
 
 /// Remove a secret from the vault
@@ -444,6 +519,41 @@ pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     })
 }
 
+// ── Key commitment ──────────────────────────────────────────────────────────
+
+/// Domain separator for key commitment
+const KEY_COMMITMENT_LABEL: &[u8] = b"dota-v5-key-commitment";
+
+/// Compute a 32-byte commitment over KDF params + public keys, keyed by
+/// the master key. Uses HKDF-Expand with the commitment data as the info string.
+///
+/// This binds the master key to the vault's public parameters, detecting any
+/// tampering (KDF downgrade, key replacement) at unlock time before decryption.
+pub(crate) fn compute_key_commitment(
+    master_key: &MasterKey,
+    kdf: &KdfParams,
+    mlkem_pk: &[u8],
+    x25519_pk: &[u8],
+) -> Vec<u8> {
+    // Build the commitment input: domain || kdf_canonical || public keys
+    let mut info = Vec::new();
+    info.extend_from_slice(KEY_COMMITMENT_LABEL);
+    info.extend_from_slice(kdf.algorithm.as_bytes());
+    info.extend_from_slice(&kdf.salt);
+    info.extend_from_slice(&kdf.time_cost.to_be_bytes());
+    info.extend_from_slice(&kdf.memory_cost.to_be_bytes());
+    info.extend_from_slice(&kdf.parallelism.to_be_bytes());
+    info.extend_from_slice(mlkem_pk);
+    info.extend_from_slice(x25519_pk);
+
+    let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
+        .expect("master key is 32 bytes, valid HKDF PRK");
+    let mut commitment = [0u8; 32];
+    hk.expand(&info, &mut commitment)
+        .expect("32-byte expand always succeeds");
+    commitment.to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +570,8 @@ mod tests {
 
         assert_eq!(unlocked.vault.version, VAULT_VERSION);
         assert_eq!(unlocked.vault.secrets.len(), 0);
+        assert!(unlocked.vault.key_commitment.is_some());
+        assert_eq!(unlocked.vault.min_version, VAULT_VERSION);
     }
 
     #[test]
@@ -484,7 +596,7 @@ mod tests {
         set_secret(&mut unlocked, "API_KEY", "sk-test-12345").unwrap();
         let value = get_secret(&unlocked, "API_KEY").unwrap();
 
-        assert_eq!(value, "sk-test-12345");
+        assert_eq!(value.expose(), "sk-test-12345");
     }
 
     #[test]
@@ -516,6 +628,30 @@ mod tests {
 
         let names = list_secrets(&unlocked);
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
+    }
+
+    #[test]
+    fn test_v5_vault_rejects_stripped_key_commitment() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Create a v5 vault with a valid key commitment
+        create_vault("test-pass", vault_path).unwrap();
+
+        // Tamper: strip the key_commitment field from the vault file
+        let json = std::fs::read_to_string(vault_path).unwrap();
+        let mut raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        raw.as_object_mut().unwrap().remove("key_commitment");
+        assert_eq!(raw["version"], 5);
+        std::fs::write(vault_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        // Unlock must fail — missing commitment on a v5 vault is tamper evidence
+        let err = unlock_vault("test-pass", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a key commitment"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
