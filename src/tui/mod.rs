@@ -60,7 +60,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 let name = parts.pop_front();
                 if let Some(name) = name {
                     match get_secret(&unlocked, name) {
-                        Ok(value) => println!("{}", value),
+                        Ok(value) => println!("{}", value.expose()),
                         Err(e) => println!("error: {}", e),
                     }
                 } else {
@@ -127,7 +127,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             "export" => {
                 for name in list_secrets(&unlocked) {
                     if let Ok(value) = get_secret(&unlocked, &name) {
-                        println!("export {}={}", name, shell_escape(&value));
+                        println!("export {}={}", name, shell_escape(value.expose()));
                     }
                 }
             }
