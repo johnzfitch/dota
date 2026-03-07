@@ -10,13 +10,13 @@
 //! - Wrong passphrase / corrupted data → error before any disk writes
 
 use super::format::{
-    EncryptedSecret, KemKeyPair, MigrationInfo, Vault, VAULT_VERSION, X25519KeyPair,
+    EncryptedSecret, KemKeyPair, MigrationInfo, VAULT_VERSION, Vault, X25519KeyPair,
 };
 use super::legacy::{VaultV1, VaultV2, VaultV3, VaultVersionProbe};
 use super::ops::{compute_key_commitment, derive_wrapping_keys, save_vault_file};
 use crate::crypto::{
-    AesKey, KdfConfig, MasterKey, aes_decrypt, aes_encrypt, derive_key, hybrid_encapsulate,
-    mlkem_generate_keypair, MlKemPublicKey, X25519PrivateKey, X25519PublicKey,
+    AesKey, KdfConfig, MasterKey, MlKemPublicKey, X25519PrivateKey, X25519PublicKey, aes_decrypt,
+    aes_encrypt, derive_key, hybrid_encapsulate, mlkem_generate_keypair,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -323,14 +323,8 @@ fn create_backup(vault_path: &str) -> Result<()> {
     }
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("vault");
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("json");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("vault");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
 
     // Clean up old backups if over limit
     let mut existing_backups = find_backups(parent, stem, ext)?;
@@ -347,29 +341,30 @@ fn create_backup(vault_path: &str) -> Result<()> {
     let backup_name = format!("{}.backup.{}.{}", stem, timestamp, ext);
     let backup_path = parent.join(&backup_name);
 
-    // Symlink protection: refuse to write through a symlink
-    if let Ok(meta) = fs::symlink_metadata(&backup_path)
-        && meta.file_type().is_symlink()
-    {
-        bail!(
-            "Refusing to write backup through symlink: {}",
-            backup_path.display()
-        );
-    }
+    // Atomic backup: write to a temp file then rename to avoid TOCTOU symlink races.
+    // This sidesteps the gap between symlink_metadata() and open() that could be exploited.
+    let source_data = fs::read(vault_path)
+        .with_context(|| format!("Failed to read vault for backup: {}", vault_path))?;
 
-    fs::copy(vault_path, &backup_path)
-        .with_context(|| format!("Failed to create vault backup at {}", backup_path.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".backup.tmp-")
+        .tempfile_in(parent)
+        .context("Failed to create temporary backup file")?;
+
+    std::io::Write::write_all(&mut tmp, &source_data).context("Failed to write backup data")?;
+    tmp.as_file()
+        .sync_all()
+        .context("Failed to sync backup data")?;
+
+    tmp.persist(&backup_path)
+        .with_context(|| format!("Failed to persist backup at {}", backup_path.display()))?;
 
     eprintln!("Backup saved: {}", backup_path.display());
     Ok(())
 }
 
 /// Find existing backup files matching the pattern `{stem}.backup.*.{ext}`
-fn find_backups(
-    dir: &Path,
-    stem: &str,
-    ext: &str,
-) -> Result<Vec<String>> {
+fn find_backups(dir: &Path, stem: &str, ext: &str) -> Result<Vec<String>> {
     let prefix = format!("{}.backup.", stem);
     let suffix = format!(".{}", ext);
 
@@ -410,8 +405,7 @@ fn parse_kdf_params(json: &str) -> Result<KdfConfig> {
 mod tests {
     use super::*;
     use crate::crypto::{
-        aes_encrypt, derive_key, generate_salt, mlkem_generate_keypair,
-        x25519_generate_keypair,
+        aes_encrypt, derive_key, generate_salt, mlkem_generate_keypair, x25519_generate_keypair,
     };
     use tempfile::tempdir;
 
@@ -448,11 +442,11 @@ mod tests {
             },
             "x25519_public_key": STANDARD.encode(x25519_pk.as_bytes()),
             "encrypted_private_key": STANDARD.encode(&enc_sk),
-            "private_key_nonce": STANDARD.encode(&nonce),
+            "private_key_nonce": STANDARD.encode(nonce),
             "secrets": {
                 "test-secret": {
                     "x25519_ephemeral_public": STANDARD.encode(eph_pk.as_bytes()),
-                    "nonce": STANDARD.encode(&secret_nonce),
+                    "nonce": STANDARD.encode(secret_nonce),
                     "ciphertext": STANDARD.encode(&secret_ct),
                     "created": "2025-01-01T00:00:00Z",
                     "modified": "2025-01-01T00:00:00Z",
@@ -494,12 +488,12 @@ mod tests {
                 "algorithm": "ML-KEM-768",
                 "public_key": STANDARD.encode(mlkem_pk.as_bytes()),
                 "encrypted_private_key": STANDARD.encode(&enc_mlkem),
-                "private_key_nonce": STANDARD.encode(&mlkem_nonce),
+                "private_key_nonce": STANDARD.encode(mlkem_nonce),
             },
             "x25519": {
                 "public_key": STANDARD.encode(x25519_pk.as_bytes()),
                 "encrypted_private_key": STANDARD.encode(&enc_x25519),
-                "private_key_nonce": STANDARD.encode(&x25519_nonce),
+                "private_key_nonce": STANDARD.encode(x25519_nonce),
             },
             "secrets": {}
         });
@@ -539,12 +533,12 @@ mod tests {
                 "algorithm": "ML-KEM-768",
                 "public_key": STANDARD.encode(mlkem_pk.as_bytes()),
                 "encrypted_private_key": STANDARD.encode(&enc_mlkem),
-                "private_key_nonce": STANDARD.encode(&mlkem_nonce),
+                "private_key_nonce": STANDARD.encode(mlkem_nonce),
             },
             "x25519": {
                 "public_key": STANDARD.encode(x25519_pk.as_bytes()),
                 "encrypted_private_key": STANDARD.encode(&enc_x25519),
-                "private_key_nonce": STANDARD.encode(&x25519_nonce),
+                "private_key_nonce": STANDARD.encode(x25519_nonce),
             },
             "secrets": {}
         });
@@ -593,14 +587,25 @@ mod tests {
             &result.kem.encrypted_private_key,
             result.kem.private_key_nonce.as_slice().try_into().unwrap(),
         );
-        assert!(mlkem_sk.is_ok(), "ML-KEM private key should decrypt with HKDF wrapping key");
+        assert!(
+            mlkem_sk.is_ok(),
+            "ML-KEM private key should decrypt with HKDF wrapping key"
+        );
 
         let x25519_sk = aes_decrypt(
             &wrapping.x25519,
             &result.x25519.encrypted_private_key,
-            result.x25519.private_key_nonce.as_slice().try_into().unwrap(),
+            result
+                .x25519
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .unwrap(),
         );
-        assert!(x25519_sk.is_ok(), "X25519 private key should decrypt with HKDF wrapping key");
+        assert!(
+            x25519_sk.is_ok(),
+            "X25519 private key should decrypt with HKDF wrapping key"
+        );
     }
 
     #[test]
@@ -639,19 +644,27 @@ mod tests {
         let x25519_sk_bytes = aes_decrypt(
             &wrapping.x25519,
             &result.x25519.encrypted_private_key,
-            result.x25519.private_key_nonce.as_slice().try_into().unwrap(),
+            result
+                .x25519
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .unwrap(),
         )
         .unwrap();
-        let x25519_sk = X25519PrivateKey::from_bytes(
-            x25519_sk_bytes.as_slice().try_into().unwrap(),
-        );
+        let x25519_sk =
+            X25519PrivateKey::from_bytes(x25519_sk_bytes.as_slice().try_into().unwrap());
 
         // Decrypt the secret using hybrid decapsulation
         let secret = &result.secrets["test-secret"];
         let kem_ct =
             crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone()).unwrap();
         let eph_pk = X25519PublicKey::from_bytes(
-            secret.x25519_ephemeral_public.as_slice().try_into().unwrap(),
+            secret
+                .x25519_ephemeral_public
+                .as_slice()
+                .try_into()
+                .unwrap(),
         );
         let aes_key =
             crate::crypto::hybrid_decapsulate(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk).unwrap();
@@ -672,7 +685,10 @@ mod tests {
 
         // No backup should have been created
         let backups = find_backups(dir.path(), "vault", "json").unwrap();
-        assert!(backups.is_empty(), "No backup should exist after failed migration");
+        assert!(
+            backups.is_empty(),
+            "No backup should exist after failed migration"
+        );
     }
 
     #[test]
@@ -774,7 +790,7 @@ mod tests {
             },
             "x25519_public_key": STANDARD.encode(x25519_pk.as_bytes()),
             "encrypted_private_key": STANDARD.encode(&enc_sk),
-            "private_key_nonce": STANDARD.encode(&nonce),
+            "private_key_nonce": STANDARD.encode(nonce),
             "secrets": {}
         })
         .to_string();
@@ -833,7 +849,10 @@ mod tests {
         let backups = find_backups(dir.path(), "vault", "json").unwrap();
         assert_eq!(backups.len(), 1);
         let backup_content = fs::read_to_string(dir.path().join(&backups[0])).unwrap();
-        assert_eq!(backup_content, json, "Backup should preserve original vault content");
+        assert_eq!(
+            backup_content, json,
+            "Backup should preserve original vault content"
+        );
     }
 
     #[test]
@@ -864,7 +883,7 @@ mod tests {
                 format!("key-{}", i),
                 serde_json::json!({
                     "x25519_ephemeral_public": STANDARD.encode(eph_pk.as_bytes()),
-                    "nonce": STANDARD.encode(&sn),
+                    "nonce": STANDARD.encode(sn),
                     "ciphertext": STANDARD.encode(&ct),
                     "created": "2025-01-01T00:00:00Z",
                     "modified": "2025-01-01T00:00:00Z",
@@ -884,7 +903,7 @@ mod tests {
             },
             "x25519_public_key": STANDARD.encode(x25519_pk.as_bytes()),
             "encrypted_private_key": STANDARD.encode(&enc_sk),
-            "private_key_nonce": STANDARD.encode(&nonce),
+            "private_key_nonce": STANDARD.encode(nonce),
             "secrets": secrets
         })
         .to_string();

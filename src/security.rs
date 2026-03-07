@@ -85,7 +85,8 @@ mod linux {
     pub const SIGTERM: c_int = 15;
     pub const SIGINT: c_int = 2;
     pub const SIGHUP: c_int = 1;
-    pub const SIG_DFL: usize = 0;
+
+    pub const SA_RESTART: c_int = 0x10000000;
 
     #[repr(C)]
     pub struct Rlimit {
@@ -93,12 +94,21 @@ mod linux {
         pub rlim_max: u64,
     }
 
+    /// POSIX sigaction struct (Linux x86_64 layout)
+    #[repr(C)]
+    pub struct SigAction {
+        pub sa_handler: extern "C" fn(c_int),
+        pub sa_flags: u64,
+        pub sa_restorer: usize,
+        pub sa_mask: [u64; 16], // sigset_t on Linux
+    }
+
     unsafe extern "C" {
         pub fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
         pub fn prctl(option: c_int, ...) -> c_int;
         pub fn mlockall(flags: c_int) -> c_int;
-        pub fn signal(signum: c_int, handler: usize) -> usize;
-        pub fn raise(sig: c_int) -> c_int;
+        pub fn sigaction(signum: c_int, act: *const SigAction, oldact: *mut SigAction) -> c_int;
+        pub fn _exit(status: c_int) -> !;
     }
 }
 
@@ -145,33 +155,39 @@ fn harden_linux() {
 /// Checked by the TUI event loop and long-running operations.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Install signal handlers for SIGTERM, SIGINT, and SIGHUP.
+/// Install signal handlers for SIGTERM, SIGINT, and SIGHUP using `sigaction`.
 ///
 /// First signal sets `SHUTDOWN_REQUESTED`, allowing destructors (and thus
-/// `ZeroizeOnDrop`) to fire during graceful exit. A second signal restores
-/// the default handler and re-raises, providing the standard double-signal
-/// force-kill escape hatch.
+/// `ZeroizeOnDrop`) to fire during graceful exit. A second signal calls
+/// `_exit(128 + sig)` for immediate termination — both operations are
+/// async-signal-safe per POSIX.
 pub fn install_signal_handlers() {
     #[cfg(target_os = "linux")]
     {
         use linux::*;
+        let action = SigAction {
+            sa_handler: signal_handler,
+            sa_flags: SA_RESTART as u64,
+            sa_restorer: 0,
+            sa_mask: [0u64; 16],
+        };
         unsafe {
             for &sig in &[SIGTERM, SIGINT, SIGHUP] {
-                signal(sig, signal_handler as *const () as usize);
+                sigaction(sig, &action, std::ptr::null_mut());
             }
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-extern "C" fn signal_handler(sig: std::os::raw::c_int) {
+extern "C" fn signal_handler(_sig: std::os::raw::c_int) {
     if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-        // Second signal — restore default action and re-raise for immediate exit.
+        // Second signal — immediate exit (async-signal-safe)
         unsafe {
-            linux::signal(sig, linux::SIG_DFL);
-            linux::raise(sig);
+            linux::_exit(128 + _sig);
         }
     } else {
+        // First signal — request graceful shutdown (atomic store is async-signal-safe)
         SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
     }
 }

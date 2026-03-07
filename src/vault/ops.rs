@@ -1,8 +1,6 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
-use super::format::{
-    EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair,
-};
+use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
@@ -427,9 +425,18 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
     let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
 
-    // Convert to String, consuming the SecretVec (inner bytes zeroized on drop)
-    let s = String::from_utf8(plaintext.into_inner()).context("Secret contains invalid UTF-8")?;
-    Ok(SecretString::new(s))
+    // Convert to String — explicitly zeroize bytes on UTF-8 failure to prevent
+    // plaintext lingering inside FromUtf8Error.
+    match String::from_utf8(plaintext.into_inner()) {
+        Ok(s) => Ok(SecretString::new(s)),
+        Err(err) => {
+            let leaked = err.as_bytes().len();
+            let mut bytes = err.into_bytes();
+            zeroize::Zeroize::zeroize(&mut bytes[..]);
+            drop(bytes);
+            anyhow::bail!("Secret contains invalid UTF-8 ({} bytes zeroized)", leaked);
+        }
+    }
 }
 
 /// Remove a secret from the vault
@@ -535,15 +542,23 @@ pub(crate) fn compute_key_commitment(
     mlkem_pk: &[u8],
     x25519_pk: &[u8],
 ) -> Vec<u8> {
-    // Build the commitment input: domain || kdf_canonical || public keys
+    // Build the commitment input with length-prefixed fields for canonical encoding.
+    // Each variable-length field is preceded by its 4-byte big-endian length to prevent
+    // ambiguous splits (e.g., short algorithm + long salt == long algorithm + short salt).
     let mut info = Vec::new();
     info.extend_from_slice(KEY_COMMITMENT_LABEL);
+    // Length-prefix variable-length fields
+    info.extend_from_slice(&(kdf.algorithm.len() as u32).to_be_bytes());
     info.extend_from_slice(kdf.algorithm.as_bytes());
+    info.extend_from_slice(&(kdf.salt.len() as u32).to_be_bytes());
     info.extend_from_slice(&kdf.salt);
+    // Fixed-size fields don't need length prefixes
     info.extend_from_slice(&kdf.time_cost.to_be_bytes());
     info.extend_from_slice(&kdf.memory_cost.to_be_bytes());
     info.extend_from_slice(&kdf.parallelism.to_be_bytes());
+    info.extend_from_slice(&(mlkem_pk.len() as u32).to_be_bytes());
     info.extend_from_slice(mlkem_pk);
+    info.extend_from_slice(&(x25519_pk.len() as u32).to_be_bytes());
     info.extend_from_slice(x25519_pk);
 
     let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
