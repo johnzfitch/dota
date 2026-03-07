@@ -1,8 +1,6 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
-use super::format::{
-    EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair,
-};
+use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
