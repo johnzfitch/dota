@@ -4,6 +4,7 @@
 
 mod cli;
 mod crypto;
+pub mod security;
 mod tui;
 mod vault;
 
@@ -12,6 +13,11 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> Result<()> {
+    // OS-level hardening: disable core dumps, ptrace, lock memory
+    security::harden_process();
+    // Signal handlers: graceful shutdown to ensure ZeroizeOnDrop fires
+    security::install_signal_handlers();
+
     let args = Cli::parse();
 
     match args.command {

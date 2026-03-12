@@ -78,13 +78,20 @@ pub fn diffie_hellman(
     // Perform DH key exchange
     let shared_secret = secret.diffie_hellman(&public);
 
-    let shared_bytes = shared_secret.to_bytes();
-    anyhow::ensure!(
-        shared_bytes.iter().any(|&b| b != 0),
-        "X25519 DH produced all-zero shared secret (small-subgroup public key)"
-    );
+    let mut shared_bytes = shared_secret.to_bytes();
+    // Constant-time zero check: bitwise OR fold visits every byte without
+    // short-circuiting, then a single comparison at the end.
+    let is_nonzero = shared_bytes.iter().fold(0u8, |acc, &b| acc | b);
+    if is_nonzero == 0 {
+        shared_bytes.zeroize();
+        anyhow::bail!("X25519 DH produced all-zero shared secret (small-subgroup public key)");
+    }
 
-    Ok(X25519SharedSecret(shared_bytes))
+    let result = X25519SharedSecret(shared_bytes);
+    // Zeroize the stack copy — data now lives inside X25519SharedSecret
+    shared_bytes.zeroize();
+    std::hint::black_box(&shared_bytes);
+    Ok(result)
 }
 
 #[cfg(test)]

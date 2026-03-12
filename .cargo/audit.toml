@@ -4,8 +4,9 @@
 [advisories]
 # Ignore advisories for unmaintained crates (informational only)
 ignore = [
-    # pqcrypto-kyber -> pqcrypto-mlkem migration tracked in TODO
-    # The implementation is still valid ML-KEM-768, just not FIPS 203 certified
+    # pqcrypto-kyber -> pqcrypto-mlkem migration pending (requires network access).
+    # The implementation is still valid ML-KEM-768, just not FIPS 203 certified.
+    # Swap to pqcrypto-mlkem 0.1 when deps can be fetched.
     "RUSTSEC-2024-0381",
 
     # paste - transitive dependency from cargo test framework
