@@ -17,6 +17,18 @@ use std::io::Write;
 use std::path::Path;
 use zeroize::Zeroizing;
 
+const KDF_ALGORITHM: &str = "argon2id";
+const SECRET_ALGORITHM: &str = "hybrid-mlkem768-x25519";
+const KEM_ALGORITHM: &str = "ML-KEM-768";
+const MIN_SALT_LEN: usize = 16;
+const MAX_SALT_LEN: usize = 128;
+const MIN_TIME_COST: u32 = 1;
+const MAX_TIME_COST: u32 = 10;
+const MIN_MEMORY_COST_KIB: u32 = 8 * 1024;
+const MAX_MEMORY_COST_KIB: u32 = 256 * 1024;
+const MIN_PARALLELISM: u32 = 1;
+const MAX_PARALLELISM: u32 = 32;
+
 /// Default vault file path
 pub fn default_vault_path() -> String {
     dirs::home_dir()
@@ -73,7 +85,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
     // Build KDF params for commitment
     let kdf_params = KdfParams {
-        algorithm: "argon2id".to_string(),
+        algorithm: KDF_ALGORITHM.to_string(),
         salt,
         time_cost: kdf_config.time_cost,
         memory_cost: kdf_config.memory_cost,
@@ -95,7 +107,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         kdf: kdf_params,
         key_commitment: Some(commitment),
         kem: KemKeyPair {
-            algorithm: "ML-KEM-768".to_string(),
+            algorithm: KEM_ALGORITHM.to_string(),
             public_key: mlkem_public.as_bytes().to_vec(),
             encrypted_private_key: encrypted_mlkem_sk,
             private_key_nonce: mlkem_nonce.to_vec(),
@@ -144,6 +156,8 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
             VAULT_VERSION
         );
     };
+
+    validate_vault_kdf(&vault)?;
 
     // Derive master key from passphrase
     let kdf_config = KdfConfig {
@@ -234,21 +248,22 @@ pub fn set_secret(unlocked: &mut UnlockedVault, name: &str, value: &str) -> Resu
 
     // Store encrypted secret
     let now = Utc::now();
-    let is_new = !unlocked.vault.secrets.contains_key(name);
+    let created = unlocked
+        .vault
+        .secrets
+        .get(name)
+        .map(|existing| existing.created)
+        .unwrap_or(now);
 
     unlocked.vault.secrets.insert(
         name.to_string(),
         EncryptedSecret {
-            algorithm: "hybrid-mlkem768-x25519".to_string(),
+            algorithm: SECRET_ALGORITHM.to_string(),
             kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
             x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
             nonce: nonce.to_vec(),
             ciphertext,
-            created: if is_new {
-                now
-            } else {
-                unlocked.vault.secrets[name].created
-            },
+            created,
             modified: now,
         },
     );
@@ -375,7 +390,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
         unlocked.vault.secrets.insert(
             name.clone(),
             EncryptedSecret {
-                algorithm: "hybrid-mlkem768-x25519".to_string(),
+                algorithm: SECRET_ALGORITHM.to_string(),
                 kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
                 x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
                 nonce: nonce.to_vec(),
@@ -402,6 +417,14 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
         .secrets
         .get(name)
         .with_context(|| format!("Secret '{}' not found", name))?;
+
+    if encrypted.algorithm != SECRET_ALGORITHM {
+        anyhow::bail!(
+            "Unsupported secret algorithm: {} (expected {})",
+            encrypted.algorithm,
+            SECRET_ALGORITHM
+        );
+    }
 
     // Parse KEM ciphertext and X25519 ephemeral public key
     let kem_ct = MlKemCiphertext::from_bytes(encrypted.kem_ciphertext.clone())?;
@@ -639,6 +662,54 @@ pub(crate) fn compute_key_commitment(
     commitment.to_vec()
 }
 
+fn validate_vault_kdf(vault: &Vault) -> Result<()> {
+    if vault.kdf.algorithm != KDF_ALGORITHM {
+        anyhow::bail!(
+            "Unsupported KDF algorithm: {} (expected {})",
+            vault.kdf.algorithm,
+            KDF_ALGORITHM
+        );
+    }
+
+    if vault.kdf.salt.len() < MIN_SALT_LEN || vault.kdf.salt.len() > MAX_SALT_LEN {
+        anyhow::bail!(
+            "Invalid KDF salt length: {} (expected {}..={})",
+            vault.kdf.salt.len(),
+            MIN_SALT_LEN,
+            MAX_SALT_LEN
+        );
+    }
+
+    if !(MIN_TIME_COST..=MAX_TIME_COST).contains(&vault.kdf.time_cost) {
+        anyhow::bail!(
+            "Invalid Argon2 time cost: {} (expected {}..={})",
+            vault.kdf.time_cost,
+            MIN_TIME_COST,
+            MAX_TIME_COST
+        );
+    }
+
+    if !(MIN_MEMORY_COST_KIB..=MAX_MEMORY_COST_KIB).contains(&vault.kdf.memory_cost) {
+        anyhow::bail!(
+            "Invalid Argon2 memory cost: {} KiB (expected {}..={} KiB)",
+            vault.kdf.memory_cost,
+            MIN_MEMORY_COST_KIB,
+            MAX_MEMORY_COST_KIB
+        );
+    }
+
+    if !(MIN_PARALLELISM..=MAX_PARALLELISM).contains(&vault.kdf.parallelism) {
+        anyhow::bail!(
+            "Invalid Argon2 parallelism: {} (expected {}..={})",
+            vault.kdf.parallelism,
+            MIN_PARALLELISM,
+            MAX_PARALLELISM
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,5 +819,39 @@ mod tests {
 
         let err = create_vault("test-passphrase", symlink.to_str().unwrap()).unwrap_err();
         assert!(err.to_string().contains("symlink"));
+    }
+
+    #[test]
+    fn test_unlock_rejects_oversized_kdf_memory() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        create_vault("test-passphrase", vault_path).unwrap();
+
+        let mut vault: Vault =
+            serde_json::from_str(&fs::read_to_string(vault_path).unwrap()).unwrap();
+        vault.kdf.memory_cost = MAX_MEMORY_COST_KIB + 1;
+        fs::write(vault_path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
+
+        let err = match unlock_vault("test-passphrase", vault_path) {
+            Ok(_) => panic!("unlock_vault unexpectedly succeeded"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Invalid Argon2 memory cost"));
+    }
+
+    #[test]
+    fn test_get_secret_rejects_unknown_algorithm() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        create_vault("test-pass", vault_path).unwrap();
+        let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
+        set_secret(&mut unlocked, "API_KEY", "sk-test-12345").unwrap();
+
+        unlocked.vault.secrets.get_mut("API_KEY").unwrap().algorithm = "legacy-algo".to_string();
+
+        let err = get_secret(&unlocked, "API_KEY").unwrap_err();
+        assert!(err.to_string().contains("Unsupported secret algorithm"));
     }
 }
