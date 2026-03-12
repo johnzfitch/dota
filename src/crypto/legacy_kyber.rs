@@ -29,6 +29,7 @@ impl LegacyKyberPublicKey {
         &self.0
     }
 
+    #[cfg(test)]
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         anyhow::ensure!(
             bytes.len() == 1184,

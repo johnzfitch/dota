@@ -10,8 +10,8 @@
 use super::{
     aes_gcm::AesKey,
     legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPublicKey},
-    mlkem::{self, MlKemCiphertext, MlKemPublicKey, MlKemSharedSecret},
-    x25519::{self, X25519PublicKey, X25519SharedSecret},
+    mlkem::{self, MlKemCiphertext, MlKemPublicKey},
+    x25519::{self, X25519PublicKey},
 };
 use anyhow::Result;
 use hkdf::Hkdf;
@@ -173,6 +173,7 @@ fn combine_shared_secrets_with_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{mlkem::MlKemSharedSecret, x25519::X25519SharedSecret};
 
     #[test]
     fn test_v6_hybrid_round_trip() {
