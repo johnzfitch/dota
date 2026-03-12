@@ -5,10 +5,15 @@ pub mod export;
 
 use clap::{Parser, Subcommand};
 
-/// Defense of the Artifacts - Post-quantum secure secrets manager
+/// Defense of the Artifacts - Post-quantum secure secrets manager with `v6`
+/// ML-KEM-768 + X25519 vaults
 #[derive(Parser, Debug)]
 #[command(name = "dota")]
-#[command(version, about, long_about = None)]
+#[command(
+    version,
+    about = "Defense of the Artifacts - Post-quantum secure secrets manager with v6 ML-KEM-768 + X25519 vaults",
+    long_about = None
+)]
 pub struct Cli {
     /// Path to vault file
     #[arg(short, long, global = true)]

@@ -10,13 +10,21 @@
 //! - Wrong passphrase / corrupted data → error before any disk writes
 
 use super::format::{
-    EncryptedSecret, KemKeyPair, MigrationInfo, VAULT_VERSION, Vault, X25519KeyPair,
+    EncryptedSecret, KemKeyPair, MigrationInfo, V5_VAULT_VERSION, V6_KEM_ALGORITHM,
+    V6_SECRET_ALGORITHM, V6_SUITE, V6_X25519_ALGORITHM, VAULT_VERSION, Vault, X25519KeyPair,
 };
 use super::legacy::{VaultV1, VaultV2, VaultV3, VaultVersionProbe};
-use super::ops::{compute_key_commitment, derive_wrapping_keys, save_vault_file};
+use super::ops::{
+    compute_key_commitment, derive_wrapping_keys, derive_wrapping_keys_v6, save_vault_file,
+    verify_v5_key_commitment,
+};
+use crate::crypto::hybrid::{
+    hybrid_decapsulate_legacy, hybrid_encapsulate_legacy, hybrid_encapsulate_v6,
+};
+use crate::crypto::legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPrivateKey};
 use crate::crypto::{
-    AesKey, KdfConfig, MasterKey, MlKemPublicKey, X25519PrivateKey, X25519PublicKey, aes_decrypt,
-    aes_encrypt, derive_key, hybrid_encapsulate, mlkem_generate_keypair,
+    AesKey, KdfConfig, MasterKey, X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt,
+    derive_key, mlkem_generate_keypair,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -62,7 +70,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
     // Build the migration path: [original_version, ..., VAULT_VERSION]
     let migration_path: Vec<u32> = (probe.version..=VAULT_VERSION).collect();
 
-    // Run the stepwise upvault chain. Each step converts vN → vN+1 in memory.
+    // Run the stepwise upvault chain. Each legacy chain terminates at v6.
     let vault = match probe.version {
         1 => {
             let v1: VaultV1 =
@@ -70,25 +78,34 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v2 = upvault_v1(v1, &master_key)?;
             let v3 = upvault_v2(v2)?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path, &master_key)?
+            let v5 = upvault_v4(v4, &master_key)?;
+            upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?
         }
         2 => {
             let v2: VaultV2 =
                 serde_json::from_str(original_json).context("Failed to parse v2 vault")?;
             let v3 = upvault_v2(v2)?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path, &master_key)?
+            let v5 = upvault_v4(v4, &master_key)?;
+            upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?
         }
         3 => {
             let v3: VaultV3 =
                 serde_json::from_str(original_json).context("Failed to parse v3 vault")?;
             let v4 = upvault_v3(v3, &master_key)?;
-            upvault_v4(v4, probe.version, &migration_path, &master_key)?
+            let v5 = upvault_v4(v4, &master_key)?;
+            upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?
         }
         4 => {
             let v4: Vault =
                 serde_json::from_str(original_json).context("Failed to parse v4 vault")?;
-            upvault_v4(v4, probe.version, &migration_path, &master_key)?
+            let v5 = upvault_v4(v4, &master_key)?;
+            upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?
+        }
+        5 => {
+            let v5: Vault =
+                serde_json::from_str(original_json).context("Failed to parse v5 vault")?;
+            upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?
         }
         _ => bail!("Unsupported vault version: {}", probe.version),
     };
@@ -139,8 +156,8 @@ fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
             .context("Invalid v1 X25519 public key length")?,
     );
 
-    // Generate new ML-KEM keypair
-    let (mlkem_public, mlkem_private) = mlkem_generate_keypair()?;
+    // Generate new legacy Kyber keypair for the in-memory v2-v5 compatibility chain.
+    let (mlkem_public, mlkem_private) = legacy_kyber::generate_keypair()?;
 
     // Encrypt both private keys using master key directly (v2 wrapping style)
     let (enc_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping_key, mlkem_private.as_bytes())?;
@@ -171,18 +188,16 @@ fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
         )?);
 
         // Re-encrypt with hybrid KEM
-        let encap = hybrid_encapsulate(
-            &MlKemPublicKey::from_bytes(mlkem_public.as_bytes().to_vec())?,
-            &x25519_public,
-        )?;
-        let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, &plaintext)?;
+        let (kem_ciphertext, x25519_ephemeral_public, derived_key) =
+            hybrid_encapsulate_legacy(&mlkem_public, &x25519_public)?;
+        let (ciphertext, nonce) = aes_encrypt(&derived_key, &plaintext)?;
 
         secrets.insert(
             name,
             EncryptedSecret {
                 algorithm: "hybrid-mlkem768-x25519".to_string(),
-                kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
-                x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
+                kem_ciphertext: kem_ciphertext.as_bytes().to_vec(),
+                x25519_ephemeral_public: x25519_ephemeral_public.as_bytes().to_vec(),
                 nonce: nonce.to_vec(),
                 ciphertext,
                 created: secret_v1.created,
@@ -218,6 +233,7 @@ fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
             private_key_nonce: v2.mlkem_private_key_nonce,
         },
         x25519: X25519KeyPair {
+            algorithm: String::new(),
             public_key: v2.x25519_public_key,
             encrypted_private_key: v2.encrypted_x25519_private_key,
             private_key_nonce: v2.x25519_private_key_nonce,
@@ -275,37 +291,172 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
             private_key_nonce: mlkem_nonce.to_vec(),
         },
         x25519: X25519KeyPair {
+            algorithm: String::new(),
             public_key: v3.x25519.public_key,
             encrypted_private_key: enc_x25519_sk,
             private_key_nonce: x25519_nonce.to_vec(),
         },
         secrets: v3.secrets,
+        suite: String::new(),
         migrated_from: None, // Will be set by upvault_v4
         min_version: 0,      // Will be set by upvault_v4
     })
 }
 
-/// v4 → v5: Add key commitment, migration metadata, and anti-rollback
-fn upvault_v4(
-    mut v4: Vault,
+/// v4 → v5: Add the legacy key commitment and anti-rollback floor.
+///
+/// This is an internal staging step used only in memory before the final v6 re-key.
+fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
+    v4.version = V5_VAULT_VERSION;
+    v4.min_version = V5_VAULT_VERSION;
+    v4.key_commitment = Some(compute_key_commitment(master_key, &v4)?);
+    v4.migrated_from = None;
+    Ok(v4)
+}
+
+/// v5 → v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
+/// rotate both asymmetric keypairs, and re-encrypt everything under real v6 semantics.
+fn upvault_v5_to_v6(
+    v5: Vault,
     original_version: u32,
     migration_path: &[u32],
     master_key: &MasterKey,
 ) -> Result<Vault> {
-    v4.version = 5;
-    v4.key_commitment = Some(compute_key_commitment(
-        master_key,
-        &v4.kdf,
-        &v4.kem.public_key,
-        &v4.x25519.public_key,
-    ));
-    v4.min_version = VAULT_VERSION;
-    v4.migrated_from = Some(MigrationInfo {
-        original_version,
-        migrated_at: Utc::now(),
-        migration_path: migration_path.to_vec(),
-    });
-    Ok(v4)
+    verify_v5_key_commitment(&v5, master_key)?;
+
+    let legacy_wrapping = derive_wrapping_keys(master_key)?;
+    let legacy_mlkem_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &legacy_wrapping.mlkem,
+            &v5.kem.encrypted_private_key,
+            v5.kem
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .context("Invalid v5 ML-KEM nonce")?,
+        )
+        .context("Failed to decrypt v5 legacy Kyber private key (wrong passphrase?)")?,
+    );
+    let legacy_mlkem_private = LegacyKyberPrivateKey::from_bytes(legacy_mlkem_sk_bytes.to_vec())?;
+
+    let legacy_x25519_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &legacy_wrapping.x25519,
+            &v5.x25519.encrypted_private_key,
+            v5.x25519
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .context("Invalid v5 X25519 nonce")?,
+        )
+        .context("Failed to decrypt v5 X25519 private key (wrong passphrase?)")?,
+    );
+    let legacy_x25519_private = X25519PrivateKey::from_bytes(
+        legacy_x25519_sk_bytes
+            .as_slice()
+            .try_into()
+            .context("Invalid X25519 key length")?,
+    );
+
+    let mut plaintext_secrets = Vec::with_capacity(v5.secrets.len());
+    for (name, secret) in &v5.secrets {
+        if secret.algorithm != "hybrid-mlkem768-x25519" {
+            bail!(
+                "Unsupported legacy secret algorithm for '{}': {}",
+                name,
+                secret.algorithm
+            );
+        }
+
+        let legacy_kem_ciphertext = LegacyKyberCiphertext::from_bytes(
+            secret.kem_ciphertext.clone(),
+        )
+        .with_context(|| {
+            format!(
+                "Invalid legacy Kyber ciphertext length for secret '{}'",
+                name
+            )
+        })?;
+        let x25519_ephemeral_public = X25519PublicKey::from_bytes(
+            secret
+                .x25519_ephemeral_public
+                .as_slice()
+                .try_into()
+                .with_context(|| {
+                    format!(
+                        "Invalid X25519 ephemeral public key length for secret '{}'",
+                        name
+                    )
+                })?,
+        );
+        let aes_key = hybrid_decapsulate_legacy(
+            &legacy_mlkem_private,
+            &legacy_x25519_private,
+            &legacy_kem_ciphertext,
+            &x25519_ephemeral_public,
+        )?;
+        let nonce: [u8; 12] = secret
+            .nonce
+            .as_slice()
+            .try_into()
+            .with_context(|| format!("Invalid nonce length for secret '{}'", name))?;
+        let plaintext = Zeroizing::new(aes_decrypt(&aes_key, &secret.ciphertext, &nonce)?);
+        plaintext_secrets.push((name.clone(), plaintext, secret.created, secret.modified));
+    }
+
+    let (mlkem_public, mlkem_private) = mlkem_generate_keypair()?;
+    let (x25519_public, x25519_private) = crate::crypto::x25519_generate_keypair();
+    let wrapping = derive_wrapping_keys_v6(master_key)?;
+    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
+    let (encrypted_x25519_sk, x25519_nonce) =
+        aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
+
+    let mut secrets = HashMap::with_capacity(plaintext_secrets.len());
+    for (name, plaintext, created, modified) in &plaintext_secrets {
+        let encap = hybrid_encapsulate_v6(&mlkem_public, &x25519_public)?;
+        let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, plaintext.as_ref())?;
+        secrets.insert(
+            name.clone(),
+            EncryptedSecret {
+                algorithm: V6_SECRET_ALGORITHM.to_string(),
+                kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
+                x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
+                nonce: nonce.to_vec(),
+                ciphertext,
+                created: *created,
+                modified: *modified,
+            },
+        );
+    }
+
+    let mut v6 = Vault {
+        version: VAULT_VERSION,
+        created: v5.created,
+        kdf: v5.kdf,
+        key_commitment: None,
+        kem: KemKeyPair {
+            algorithm: V6_KEM_ALGORITHM.to_string(),
+            public_key: mlkem_public.as_bytes().to_vec(),
+            encrypted_private_key: encrypted_mlkem_sk,
+            private_key_nonce: mlkem_nonce.to_vec(),
+        },
+        x25519: X25519KeyPair {
+            algorithm: V6_X25519_ALGORITHM.to_string(),
+            public_key: x25519_public.as_bytes().to_vec(),
+            encrypted_private_key: encrypted_x25519_sk,
+            private_key_nonce: x25519_nonce.to_vec(),
+        },
+        secrets,
+        suite: V6_SUITE.to_string(),
+        migrated_from: Some(MigrationInfo {
+            original_version,
+            migrated_at: Utc::now(),
+            migration_path: migration_path.to_vec(),
+        }),
+        min_version: VAULT_VERSION,
+    };
+    v6.key_commitment = Some(compute_key_commitment(master_key, &v6)?);
+    Ok(v6)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,9 +550,11 @@ fn parse_kdf_params(json: &str) -> Result<KdfConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{
-        aes_encrypt, derive_key, generate_salt, mlkem_generate_keypair, x25519_generate_keypair,
-    };
+    use crate::crypto::hybrid::hybrid_decapsulate_v6;
+    use crate::crypto::legacy_kyber;
+    use crate::crypto::{aes_encrypt, derive_key, generate_salt, x25519_generate_keypair};
+    use crate::vault::format::V6_SECRET_ALGORITHM;
+    use crate::vault::ops::compute_v5_key_commitment;
     use tempfile::tempdir;
 
     /// Helper: build a v1 vault JSON for testing
@@ -462,7 +615,7 @@ mod tests {
         let master_key = derive_key(passphrase, &config).unwrap();
         let wrapping_key = AesKey::from_bytes(*master_key.as_bytes());
 
-        let (mlkem_pk, mlkem_sk) = mlkem_generate_keypair().unwrap();
+        let (mlkem_pk, mlkem_sk) = legacy_kyber::generate_keypair().unwrap();
         let (x25519_pk, x25519_sk) = x25519_generate_keypair();
 
         let (enc_mlkem, mlkem_nonce) = aes_encrypt(&wrapping_key, mlkem_sk.as_bytes()).unwrap();
@@ -495,6 +648,61 @@ mod tests {
         json.to_string()
     }
 
+    fn build_v3_vault_with_secret(passphrase: &str) -> String {
+        let config = KdfConfig {
+            salt: generate_salt(),
+            time_cost: 1,
+            memory_cost: 8192,
+            parallelism: 1,
+        };
+        let master_key = derive_key(passphrase, &config).unwrap();
+        let wrapping_key = AesKey::from_bytes(*master_key.as_bytes());
+
+        let (mlkem_pk, mlkem_sk) = legacy_kyber::generate_keypair().unwrap();
+        let (x25519_pk, x25519_sk) = x25519_generate_keypair();
+
+        let (enc_mlkem, mlkem_nonce) = aes_encrypt(&wrapping_key, mlkem_sk.as_bytes()).unwrap();
+        let (enc_x25519, x25519_nonce) = aes_encrypt(&wrapping_key, x25519_sk.as_bytes()).unwrap();
+        let (kem_ct, eph_pk, aes_key) = hybrid_encapsulate_legacy(&mlkem_pk, &x25519_pk).unwrap();
+        let (ciphertext, nonce) = aes_encrypt(&aes_key, b"v3-sample-secret").unwrap();
+
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        serde_json::json!({
+            "version": 3,
+            "created": "2025-06-01T00:00:00Z",
+            "kdf": {
+                "algorithm": "argon2id",
+                "salt": STANDARD.encode(&config.salt),
+                "time_cost": config.time_cost,
+                "memory_cost": config.memory_cost,
+                "parallelism": config.parallelism,
+            },
+            "kem": {
+                "algorithm": "ML-KEM-768",
+                "public_key": STANDARD.encode(mlkem_pk.as_bytes()),
+                "encrypted_private_key": STANDARD.encode(&enc_mlkem),
+                "private_key_nonce": STANDARD.encode(mlkem_nonce),
+            },
+            "x25519": {
+                "public_key": STANDARD.encode(x25519_pk.as_bytes()),
+                "encrypted_private_key": STANDARD.encode(&enc_x25519),
+                "private_key_nonce": STANDARD.encode(x25519_nonce),
+            },
+            "secrets": {
+                "sample-secret": {
+                    "algorithm": "hybrid-mlkem768-x25519",
+                    "kem_ciphertext": STANDARD.encode(kem_ct.as_bytes()),
+                    "x25519_ephemeral_public": STANDARD.encode(eph_pk.as_bytes()),
+                    "nonce": STANDARD.encode(nonce),
+                    "ciphertext": STANDARD.encode(&ciphertext),
+                    "created": "2025-06-01T00:00:00Z",
+                    "modified": "2025-06-01T00:00:00Z"
+                }
+            }
+        })
+        .to_string()
+    }
+
     /// Helper: build a v4 vault JSON for testing
     fn build_v4_vault(passphrase: &str) -> String {
         let config = KdfConfig {
@@ -506,7 +714,7 @@ mod tests {
         let master_key = derive_key(passphrase, &config).unwrap();
         let wrapping = derive_wrapping_keys(&master_key).unwrap();
 
-        let (mlkem_pk, mlkem_sk) = mlkem_generate_keypair().unwrap();
+        let (mlkem_pk, mlkem_sk) = legacy_kyber::generate_keypair().unwrap();
         let (x25519_pk, x25519_sk) = x25519_generate_keypair();
 
         let (enc_mlkem, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_sk.as_bytes()).unwrap();
@@ -540,34 +748,102 @@ mod tests {
         json.to_string()
     }
 
+    fn build_v5_vault_with_secret(passphrase: &str) -> String {
+        let config = KdfConfig {
+            salt: generate_salt(),
+            time_cost: 1,
+            memory_cost: 8192,
+            parallelism: 1,
+        };
+        let master_key = derive_key(passphrase, &config).unwrap();
+        let wrapping = derive_wrapping_keys(&master_key).unwrap();
+
+        let (mlkem_pk, mlkem_sk) = legacy_kyber::generate_keypair().unwrap();
+        let (x25519_pk, x25519_sk) = x25519_generate_keypair();
+        let (enc_mlkem, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_sk.as_bytes()).unwrap();
+        let (enc_x25519, x25519_nonce) =
+            aes_encrypt(&wrapping.x25519, x25519_sk.as_bytes()).unwrap();
+        let (kem_ct, eph_pk, aes_key) = hybrid_encapsulate_legacy(&mlkem_pk, &x25519_pk).unwrap();
+        let (ciphertext, nonce) = aes_encrypt(&aes_key, b"legacy-v5-secret").unwrap();
+
+        let mut vault = Vault {
+            version: V5_VAULT_VERSION,
+            created: Utc::now(),
+            kdf: super::super::format::KdfParams {
+                algorithm: "argon2id".to_string(),
+                salt: config.salt.clone(),
+                time_cost: config.time_cost,
+                memory_cost: config.memory_cost,
+                parallelism: config.parallelism,
+            },
+            key_commitment: None,
+            kem: KemKeyPair {
+                algorithm: "ML-KEM-768".to_string(),
+                public_key: mlkem_pk.as_bytes().to_vec(),
+                encrypted_private_key: enc_mlkem,
+                private_key_nonce: mlkem_nonce.to_vec(),
+            },
+            x25519: X25519KeyPair {
+                algorithm: String::new(),
+                public_key: x25519_pk.as_bytes().to_vec(),
+                encrypted_private_key: enc_x25519,
+                private_key_nonce: x25519_nonce.to_vec(),
+            },
+            secrets: HashMap::from([(
+                "legacy-secret".to_string(),
+                EncryptedSecret {
+                    algorithm: "hybrid-mlkem768-x25519".to_string(),
+                    kem_ciphertext: kem_ct.as_bytes().to_vec(),
+                    x25519_ephemeral_public: eph_pk.as_bytes().to_vec(),
+                    nonce: nonce.to_vec(),
+                    ciphertext,
+                    created: Utc::now(),
+                    modified: Utc::now(),
+                },
+            )]),
+            suite: String::new(),
+            migrated_from: None,
+            min_version: V5_VAULT_VERSION,
+        };
+        vault.key_commitment = Some(compute_v5_key_commitment(
+            &master_key,
+            &vault.kdf,
+            &vault.kem.public_key,
+            &vault.x25519.public_key,
+        ));
+        serde_json::to_string(&vault).unwrap()
+    }
+
     #[test]
-    fn test_upvault_v4_to_v5_adds_metadata() {
+    fn test_upvault_v4_to_v6_adds_metadata() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().join("vault.json");
         let json = build_v4_vault("test-passphrase");
         fs::write(&vault_path, &json).unwrap();
 
         let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
-        assert_eq!(result.version, 5);
+        assert_eq!(result.version, VAULT_VERSION);
         let info = result.migrated_from.as_ref().unwrap();
         assert_eq!(info.original_version, 4);
-        assert_eq!(info.migration_path, vec![4, 5]);
+        assert_eq!(info.migration_path, vec![4, 5, 6]);
+        assert_eq!(result.suite, V6_SUITE);
+        assert_eq!(result.x25519.algorithm, V6_X25519_ALGORITHM);
     }
 
     #[test]
-    fn test_upvault_v3_to_v5_rewraps_keys() {
+    fn test_upvault_v3_to_v6_rekeys_keys() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().join("vault.json");
         let json = build_v3_vault("test-passphrase");
         fs::write(&vault_path, &json).unwrap();
 
         let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
-        assert_eq!(result.version, 5);
+        assert_eq!(result.version, VAULT_VERSION);
         let info = result.migrated_from.as_ref().unwrap();
         assert_eq!(info.original_version, 3);
-        assert_eq!(info.migration_path, vec![3, 4, 5]);
+        assert_eq!(info.migration_path, vec![3, 4, 5, 6]);
 
-        // Verify the private keys can be decrypted with HKDF-derived wrapping keys
+        // Verify the private keys are now wrapped with v6 wrapping labels.
         let config = KdfConfig {
             salt: result.kdf.salt.clone(),
             time_cost: result.kdf.time_cost,
@@ -575,7 +851,7 @@ mod tests {
             parallelism: result.kdf.parallelism,
         };
         let mk = derive_key("test-passphrase", &config).unwrap();
-        let wrapping = derive_wrapping_keys(&mk).unwrap();
+        let wrapping = derive_wrapping_keys_v6(&mk).unwrap();
 
         let mlkem_sk = aes_decrypt(
             &wrapping.mlkem,
@@ -584,7 +860,7 @@ mod tests {
         );
         assert!(
             mlkem_sk.is_ok(),
-            "ML-KEM private key should decrypt with HKDF wrapping key"
+            "ML-KEM private key should decrypt with v6 wrapping key"
         );
 
         let x25519_sk = aes_decrypt(
@@ -599,25 +875,26 @@ mod tests {
         );
         assert!(
             x25519_sk.is_ok(),
-            "X25519 private key should decrypt with HKDF wrapping key"
+            "X25519 private key should decrypt with v6 wrapping key"
         );
     }
 
     #[test]
-    fn test_upvault_v1_to_v5_full_chain() {
+    fn test_upvault_v1_to_v6_full_chain() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().join("vault.json");
         let (json, _config) = build_v1_vault("test-passphrase");
         fs::write(&vault_path, &json).unwrap();
 
         let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
-        assert_eq!(result.version, 5);
+        assert_eq!(result.version, VAULT_VERSION);
         let info = result.migrated_from.as_ref().unwrap();
         assert_eq!(info.original_version, 1);
-        assert_eq!(info.migration_path, vec![1, 2, 3, 4, 5]);
+        assert_eq!(info.migration_path, vec![1, 2, 3, 4, 5, 6]);
         assert!(result.secrets.contains_key("test-secret"));
+        assert_eq!(result.secrets["test-secret"].algorithm, V6_SECRET_ALGORITHM);
 
-        // Verify the migrated secret is decryptable
+        // Verify the migrated secret is decryptable under v6 semantics.
         let config = KdfConfig {
             salt: result.kdf.salt.clone(),
             time_cost: result.kdf.time_cost,
@@ -625,7 +902,7 @@ mod tests {
             parallelism: result.kdf.parallelism,
         };
         let mk = derive_key("test-passphrase", &config).unwrap();
-        let wrapping = derive_wrapping_keys(&mk).unwrap();
+        let wrapping = derive_wrapping_keys_v6(&mk).unwrap();
 
         // Decrypt private keys
         let mlkem_sk_bytes = aes_decrypt(
@@ -661,11 +938,132 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let aes_key =
-            crate::crypto::hybrid_decapsulate(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk).unwrap();
+        let aes_key = hybrid_decapsulate_v6(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk).unwrap();
         let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
         let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "my-secret-value");
+    }
+
+    #[test]
+    fn test_upvault_v3_sample_secret_migrates_end_to_end_to_v6() {
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        let json = build_v3_vault_with_secret("test-passphrase");
+        fs::write(&vault_path, &json).unwrap();
+
+        let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
+        assert_eq!(result.version, VAULT_VERSION);
+        assert!(result.secrets.contains_key("sample-secret"));
+        assert_eq!(
+            result.secrets["sample-secret"].algorithm,
+            V6_SECRET_ALGORITHM
+        );
+
+        let config = KdfConfig {
+            salt: result.kdf.salt.clone(),
+            time_cost: result.kdf.time_cost,
+            memory_cost: result.kdf.memory_cost,
+            parallelism: result.kdf.parallelism,
+        };
+        let mk = derive_key("test-passphrase", &config).unwrap();
+        let wrapping = derive_wrapping_keys_v6(&mk).unwrap();
+        let mlkem_sk_bytes = aes_decrypt(
+            &wrapping.mlkem,
+            &result.kem.encrypted_private_key,
+            result.kem.private_key_nonce.as_slice().try_into().unwrap(),
+        )
+        .unwrap();
+        let mlkem_sk = crate::crypto::MlKemPrivateKey::from_bytes(mlkem_sk_bytes).unwrap();
+        let x25519_sk_bytes = aes_decrypt(
+            &wrapping.x25519,
+            &result.x25519.encrypted_private_key,
+            result
+                .x25519
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let x25519_sk =
+            X25519PrivateKey::from_bytes(x25519_sk_bytes.as_slice().try_into().unwrap());
+
+        let secret = &result.secrets["sample-secret"];
+        let kem_ct =
+            crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone()).unwrap();
+        let eph_pk = X25519PublicKey::from_bytes(
+            secret
+                .x25519_ephemeral_public
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        let aes_key = hybrid_decapsulate_v6(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk).unwrap();
+        let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
+        let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
+        assert_eq!(String::from_utf8(plaintext).unwrap(), "v3-sample-secret");
+    }
+
+    #[test]
+    fn test_upvault_v5_to_v6_preserves_secret_values() {
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        let json = build_v5_vault_with_secret("test-passphrase");
+        fs::write(&vault_path, &json).unwrap();
+
+        let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
+        assert_eq!(result.version, VAULT_VERSION);
+        let info = result.migrated_from.as_ref().unwrap();
+        assert_eq!(info.original_version, 5);
+        assert_eq!(info.migration_path, vec![5, 6]);
+        assert_eq!(
+            result.secrets["legacy-secret"].algorithm,
+            V6_SECRET_ALGORITHM
+        );
+
+        let config = KdfConfig {
+            salt: result.kdf.salt.clone(),
+            time_cost: result.kdf.time_cost,
+            memory_cost: result.kdf.memory_cost,
+            parallelism: result.kdf.parallelism,
+        };
+        let mk = derive_key("test-passphrase", &config).unwrap();
+        let wrapping = derive_wrapping_keys_v6(&mk).unwrap();
+        let mlkem_sk_bytes = aes_decrypt(
+            &wrapping.mlkem,
+            &result.kem.encrypted_private_key,
+            result.kem.private_key_nonce.as_slice().try_into().unwrap(),
+        )
+        .unwrap();
+        let mlkem_sk = crate::crypto::MlKemPrivateKey::from_bytes(mlkem_sk_bytes).unwrap();
+        let x25519_sk_bytes = aes_decrypt(
+            &wrapping.x25519,
+            &result.x25519.encrypted_private_key,
+            result
+                .x25519
+                .private_key_nonce
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let x25519_sk =
+            X25519PrivateKey::from_bytes(x25519_sk_bytes.as_slice().try_into().unwrap());
+
+        let secret = &result.secrets["legacy-secret"];
+        let kem_ct =
+            crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone()).unwrap();
+        let eph_pk = X25519PublicKey::from_bytes(
+            secret
+                .x25519_ephemeral_public
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        let aes_key = hybrid_decapsulate_v6(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk).unwrap();
+        let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
+        let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
+        assert_eq!(String::from_utf8(plaintext).unwrap(), "legacy-v5-secret");
     }
 
     #[test]
@@ -795,7 +1193,7 @@ mod tests {
         fs::write(&vault_path, &json).unwrap();
 
         let result = upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
-        assert_eq!(result.version, 5);
+        assert_eq!(result.version, VAULT_VERSION);
         assert!(result.secrets.is_empty());
     }
 
@@ -817,7 +1215,44 @@ mod tests {
     }
 
     #[test]
-    fn test_migrated_vault_file_is_valid_v5() {
+    fn test_malformed_legacy_kyber_ciphertext_fails_cleanly() {
+        use base64::Engine as _;
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        let json = build_v5_vault_with_secret("test-passphrase");
+        fs::write(&vault_path, &json).unwrap();
+
+        let mut raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let secret = raw["secrets"]["legacy-secret"].as_object_mut().unwrap();
+        let original = secret.get("kem_ciphertext").unwrap().as_str().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(original)
+            .unwrap();
+        let malformed = base64::engine::general_purpose::STANDARD.encode(&bytes[..1087]);
+        secret.insert(
+            "kem_ciphertext".to_string(),
+            serde_json::Value::String(malformed),
+        );
+        let malformed_json = serde_json::to_string(&raw).unwrap();
+        fs::write(&vault_path, &malformed_json).unwrap();
+
+        let err = upvault(
+            &malformed_json,
+            "test-passphrase",
+            vault_path.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("legacy Kyber ciphertext")
+                || err.to_string().contains("ciphertext length"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_migrated_vault_file_is_valid_v6() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().join("vault.json");
         let json = build_v4_vault("test-passphrase");
@@ -825,11 +1260,12 @@ mod tests {
 
         upvault(&json, "test-passphrase", vault_path.to_str().unwrap()).unwrap();
 
-        // Read the file back and verify it's valid v5
+        // Read the file back and verify it's valid v6
         let saved = fs::read_to_string(&vault_path).unwrap();
         let vault: Vault = serde_json::from_str(&saved).unwrap();
-        assert_eq!(vault.version, 5);
+        assert_eq!(vault.version, VAULT_VERSION);
         assert!(vault.migrated_from.is_some());
+        assert_eq!(vault.suite, V6_SUITE);
     }
 
     #[test]

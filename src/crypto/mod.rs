@@ -1,7 +1,8 @@
 //! Cryptographic primitives for dota
 //!
 //! Implements hybrid post-quantum + classical encryption:
-//! - ML-KEM-768 (FIPS 203) for post-quantum security
+//! - Real ML-KEM-768 (FIPS 203) for v6+ vaults
+//! - Legacy Kyber768 compatibility for v2-v5 migration
 //! - X25519 for classical ECDH
 //! - AES-256-GCM for symmetric encryption
 //! - Argon2id for passphrase-based key derivation
@@ -10,6 +11,7 @@
 pub mod aes_gcm;
 pub mod hybrid;
 pub mod kdf;
+pub mod legacy_kyber;
 pub mod mlkem;
 pub mod x25519;
 

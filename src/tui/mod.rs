@@ -124,10 +124,17 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                     unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
                 );
                 println!("Secrets:       {}", unlocked.vault.secrets.len());
+                println!("Min version:   {}", unlocked.vault.min_version);
+                println!("Suite:         {}", unlocked.vault.suite);
+                println!(
+                    "Header auth:   {}",
+                    describe_key_commitment(&unlocked.vault)
+                );
                 println!();
                 println!("Cryptography");
                 println!("─────────────────");
                 println!("KEM:           {}", unlocked.vault.kem.algorithm);
+                println!("X25519:        {}", unlocked.vault.x25519.algorithm);
                 println!(
                     "KDF:           {} (t={}, m={}, p={})",
                     unlocked.vault.kdf.algorithm,
@@ -136,7 +143,25 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                     unlocked.vault.kdf.parallelism
                 );
                 println!("Encryption:    AES-256-GCM");
-                println!("Key Derivation: HKDF-SHA256");
+                println!("Hybrid KDF:    HKDF-SHA256");
+                if let Some(ref info) = unlocked.vault.migrated_from {
+                    println!();
+                    println!("Migration");
+                    println!("─────────────────");
+                    println!("Original version: v{}", info.original_version);
+                    println!(
+                        "Migrated at:      {}",
+                        info.migrated_at.format("%Y-%m-%d %H:%M:%S")
+                    );
+                    println!(
+                        "Migration path:   {}",
+                        info.migration_path
+                            .iter()
+                            .map(|v| format!("v{}", v))
+                            .collect::<Vec<_>>()
+                            .join(" → ")
+                    );
+                }
             }
             "export" => {
                 for name in list_secrets(&unlocked) {
@@ -167,6 +192,17 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
 
     // All SecretStrings (passphrase, values) are zeroized here via drop.
     Ok(())
+}
+
+fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str {
+    match (vault.version, vault.key_commitment.is_some()) {
+        (6.., true) => "HMAC-SHA256 (present)",
+        (6.., false) => "HMAC-SHA256 (absent)",
+        (5, true) => "legacy HKDF-based v5 commitment (present)",
+        (5, false) => "legacy HKDF-based v5 commitment (absent)",
+        (_, true) => "present",
+        (_, false) => "absent",
+    }
 }
 
 fn shell_escape(s: &str) -> String {

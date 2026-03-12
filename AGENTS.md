@@ -51,6 +51,7 @@ RUST_LOG=debug cargo run
 | `src/main.rs` | CLI entry point and command routing |
 | `src/crypto/hybrid.rs` | Hybrid KEM (ML-KEM-768 + X25519) |
 | `src/crypto/mlkem.rs` | ML-KEM-768 wrapper (post-quantum) |
+| `src/crypto/legacy_kyber.rs` | Read-only legacy Kyber compatibility for `v2-v5` migration |
 | `src/crypto/x25519.rs` | X25519 ECDH wrapper (classical) |
 | `src/crypto/kdf.rs` | Argon2 key derivation and HKDF |
 | `src/crypto/aes_gcm.rs` | AES-256-GCM symmetric encryption |
@@ -102,4 +103,5 @@ cargo test crypto::hybrid
 - All crypto types implement `Zeroize` and `Drop` for memory safety
 - Vault files are JSON but contain base64-encoded binary data
 - Test vectors use fixed seeds; production uses `OsRng`
-- The `v2` format is current; `v1` was deprecated before initial release
+- The current on-disk format is `v6`; legacy `v1-v5` vaults are migration-only inputs and are rewritten to `v6` on unlock
+- `v6` authenticates `version`, `min_version`, KDF params, both algorithm ids, both public keys, and `suite` with an HMAC-SHA256 header commitment before any private-key decryption
