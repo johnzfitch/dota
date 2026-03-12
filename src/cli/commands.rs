@@ -10,7 +10,7 @@ use rpassword::prompt_password;
 use zeroize::Zeroize;
 
 /// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
-/// Returns a `SecretString` that is zeroized on drop.
+/// Returns a SecretString for automatic zeroization on drop.
 fn read_passphrase(prompt: &str) -> Result<SecretString> {
     if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
         && !p.is_empty()
@@ -32,7 +32,7 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Creating new vault at: {}", vault_path);
     println!();
 
-    // Prompt for passphrase — wrap in SecretString immediately
+    // Prompt for passphrase (wrapped in SecretString for zeroization)
     let passphrase = SecretString::new(prompt_password("Enter passphrase: ")?);
     let confirm = SecretString::new(prompt_password("Confirm passphrase: ")?);
 
@@ -61,28 +61,26 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
 pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Get value from args, stdin (if piped), or interactive prompt.
-    // Wrap in SecretString for automatic zeroization.
-    let secret_value = SecretString::new(match value {
-        Some(v) => v,
+    // Get value from args, stdin (if piped), or interactive prompt
+    let secret_value = match value {
+        Some(v) => SecretString::new(v),
         None => {
             use std::io::{IsTerminal, Read};
             if std::io::stdin().is_terminal() {
-                prompt_password(format!("Enter value for '{}': ", name))?
+                SecretString::new(prompt_password(format!("Enter value for '{}': ", name))?)
             } else {
                 let mut buf = String::new();
                 std::io::stdin()
                     .take(1024 * 1024)
                     .read_to_string(&mut buf)?;
                 let trimmed = buf.trim_end().to_string();
-                // Zeroize the original buffer containing the raw stdin read
                 buf.zeroize();
                 if trimmed.is_empty() {
                     anyhow::bail!(
                         "empty value from stdin; pass a value as an argument or use an interactive terminal"
                     );
                 }
-                trimmed
+                SecretString::new(trimmed)
             }
         }
     });
@@ -176,6 +174,17 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
         unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
     );
     println!("Secrets:       {}", unlocked.vault.secrets.len());
+    if unlocked.vault.min_version > 0 {
+        println!("Min version:   {}", unlocked.vault.min_version);
+    }
+    println!(
+        "Key commitment: {}",
+        if unlocked.vault.key_commitment.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
     println!();
     println!("Cryptography");
     println!("─────────────────");
@@ -189,6 +198,25 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     );
     println!("Encryption:    AES-256-GCM");
     println!("Key Derivation: HKDF-SHA256");
+
+    if let Some(ref info) = unlocked.vault.migrated_from {
+        println!();
+        println!("Migration");
+        println!("─────────────────");
+        println!("Original version: v{}", info.original_version);
+        println!(
+            "Migrated at:      {}",
+            info.migrated_at.format("%Y-%m-%d %H:%M:%S")
+        );
+        println!(
+            "Migration path:   {}",
+            info.migration_path
+                .iter()
+                .map(|v| format!("v{}", v))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
 
     Ok(())
 }
@@ -238,3 +266,47 @@ pub fn handle_rotate_keys(vault_path: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+/// Handle 'upgrade' command — explicitly upgrade vault to latest format
+pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
+    let vault_path = vault_path.unwrap_or_else(default_vault_path);
+
+    if !std::path::Path::new(&vault_path).exists() {
+        anyhow::bail!("No vault found at: {}", vault_path);
+    }
+
+    // Read vault to check version before prompting for passphrase
+    let json =
+        std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
+    let probe: serde_json::Value =
+        serde_json::from_str(&json).context("Failed to parse vault file")?;
+    let version = probe["version"]
+        .as_u64()
+        .context("Missing version field")?;
+
+    use crate::vault::format::VAULT_VERSION;
+    if version >= VAULT_VERSION as u64 {
+        println!(
+            "Vault is already at v{} (current: v{}). No upgrade needed.",
+            version, VAULT_VERSION
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Upgrading vault from v{} to v{}...",
+        version, VAULT_VERSION
+    );
+    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+
+    // unlock_vault handles migration automatically
+    let _unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
+
+    println!(
+        "Vault upgraded successfully to v{}.",
+        VAULT_VERSION
+    );
+    Ok(())
+}
+
+use anyhow::Context;

@@ -1,7 +1,7 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
 use super::format::{
-    EncryptedSecret, KdfParams, KemKeyPair, MIN_VAULT_VERSION, VAULT_VERSION, Vault, X25519KeyPair,
+    EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair,
 };
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -30,6 +30,15 @@ pub fn default_vault_path() -> String {
 }
 
 /// Unlocked vault with decrypted keypairs
+impl std::fmt::Debug for UnlockedVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockedVault")
+            .field("vault_version", &self.vault.version)
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct UnlockedVault {
     pub vault: Vault,
     pub mlkem_private: MlKemPrivateKey,
@@ -73,7 +82,7 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         parallelism: kdf_config.parallelism,
     };
 
-    // Compute key commitment: HMAC-SHA256 over KDF params + public keys
+    // Compute key commitment
     let commitment = compute_key_commitment(
         &master_key,
         &kdf_params,
@@ -99,6 +108,8 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
             private_key_nonce: x25519_nonce.to_vec(),
         },
         secrets: HashMap::new(),
+        migrated_from: None,
+        min_version: VAULT_VERSION,
     };
 
     // Create parent directory if needed
@@ -114,25 +125,27 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
-    // Read and parse vault file
+    // Read and parse vault file, migrating if needed
     let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
-    let vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
 
-    // Version range check with migration support
-    if vault.version < MIN_VAULT_VERSION {
-        anyhow::bail!(
-            "Vault version {} is no longer supported. \
-             Please re-initialize with 'dota init'.",
-            vault.version,
+    let probe: super::legacy::VaultVersionProbe =
+        serde_json::from_str(&json).context("Failed to parse vault version")?;
+
+    let vault: Vault = if probe.version == VAULT_VERSION {
+        serde_json::from_str(&json).context("Failed to parse vault file")?
+    } else if probe.version < VAULT_VERSION {
+        eprintln!(
+            "Migrating vault from v{} to v{}...",
+            probe.version, VAULT_VERSION
         );
-    }
-    if vault.version > VAULT_VERSION {
+        super::migration::upvault(&json, passphrase, vault_path)?
+    } else {
         anyhow::bail!(
-            "Vault version {} requires a newer version of dota. \
-             Please upgrade dota to open this vault.",
-            vault.version,
+            "Vault version {} is newer than supported (v{}). Please update dota.",
+            probe.version,
+            VAULT_VERSION
         );
-    }
+    };
 
     // Derive master key from passphrase
     let kdf_config = KdfConfig {
@@ -144,7 +157,7 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     let master_key = derive_key(passphrase, &kdf_config)?;
 
     // Verify key commitment (v5+). v4 vaults lack this field and are
-    // accepted without verification — they will be auto-upgraded on next save.
+    // accepted without verification — they get upgraded by the migration path.
     if let Some(ref stored_commitment) = vault.key_commitment {
         let expected = compute_key_commitment(
             &master_key,
@@ -168,20 +181,17 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
 
     // Derive separate wrapping keys and decrypt private keys
     let wrapping = derive_wrapping_keys(&master_key)?;
+    let mlkem_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &wrapping.mlkem,
+            &vault.kem.encrypted_private_key,
+            vault.kem.private_key_nonce.as_slice().try_into()?,
+        )
+        .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?,
+    );
+    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
 
-    // Wrap decrypted bytes in SecretVec for automatic zeroization.
-    // mlkem_sk_bytes is moved into MlKemPrivateKey (consumed, no residue).
-    let mlkem_sk_bytes = aes_decrypt(
-        &wrapping.mlkem,
-        &vault.kem.encrypted_private_key,
-        vault.kem.private_key_nonce.as_slice().try_into()?,
-    )
-    .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?;
-    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes)?;
-
-    // x25519_sk_bytes is borrowed (not moved) — wrap in SecretVec so it
-    // is zeroized when this scope exits.
-    let x25519_sk_bytes = SecretVec::new(
+    let x25519_sk_bytes = Zeroizing::new(
         aes_decrypt(
             &wrapping.x25519,
             &vault.x25519.encrypted_private_key,
@@ -191,11 +201,10 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     );
     let x25519_private = X25519PrivateKey::from_bytes(
         x25519_sk_bytes
-            .expose()
+            .as_ref()
             .try_into()
             .context("Invalid X25519 key length")?,
     );
-    // x25519_sk_bytes (SecretVec) drops here, zeroizing the heap copy
 
     Ok(UnlockedVault {
         vault,
@@ -287,6 +296,7 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
         &unlocked.vault.x25519.public_key,
     ));
     unlocked.vault.version = VAULT_VERSION;
+    unlocked.vault.min_version = VAULT_VERSION;
 
     save_vault(unlocked)?;
 
@@ -305,7 +315,6 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
 
     let existing_names = list_secrets(unlocked);
     // Collect all plaintext secrets into SecretStrings for automatic zeroization.
-    // This is the worst-case window: all secrets are in memory simultaneously.
     let mut secrets: Vec<(String, SecretString, chrono::DateTime<Utc>)> =
         Vec::with_capacity(existing_names.len());
     for name in &existing_names {
@@ -347,6 +356,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
         &unlocked.vault.x25519.public_key,
     ));
     unlocked.vault.version = VAULT_VERSION;
+    unlocked.vault.min_version = VAULT_VERSION;
 
     unlocked.vault.secrets.clear();
     let mlkem_public = MlKemPublicKey::from_bytes(unlocked.vault.kem.public_key.clone())?;
@@ -447,7 +457,7 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 }
 
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
-fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
+pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
     if let Ok(meta) = fs::symlink_metadata(vault_path)
         && meta.file_type().is_symlink()
@@ -478,9 +488,9 @@ fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
 /// Wrapping keys derived from the master key via HKDF-Expand with purpose labels.
 /// Provides cryptographic domain separation: each private key is encrypted under
 /// a distinct wrapping key even though both are derived from the same master key.
-struct WrappingKeys {
-    mlkem: AesKey,
-    x25519: AesKey,
+pub(crate) struct WrappingKeys {
+    pub(crate) mlkem: AesKey,
+    pub(crate) x25519: AesKey,
 }
 
 /// Purpose labels for HKDF-Expand key derivation (domain separation)
@@ -491,18 +501,19 @@ const WRAP_LABEL_X25519: &[u8] = b"dota-v4-wrap-x25519";
 ///
 /// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
-fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
+pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     let hk = Hkdf::<Sha256>::from_prk(mk.as_bytes())
         .map_err(|_| anyhow::anyhow!("master key too short for HKDF-Expand PRK"))?;
 
-    let mut mlkem_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_MLKEM, &mut mlkem_key)
+    let mut mlkem_key = Zeroizing::new([0u8; 32]);
+    hk.expand(WRAP_LABEL_MLKEM, mlkem_key.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expand for ML-KEM wrapping key failed: {}", e))?;
 
-    let mut x25519_key = [0u8; 32];
-    hk.expand(WRAP_LABEL_X25519, &mut x25519_key)
+    let mut x25519_key = Zeroizing::new([0u8; 32]);
+    hk.expand(WRAP_LABEL_X25519, x25519_key.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expand for X25519 wrapping key failed: {}", e))?;
 
+<<<<<<< HEAD
     let keys = WrappingKeys {
         mlkem: AesKey::from_bytes(mlkem_key),
         x25519: AesKey::from_bytes(x25519_key),
@@ -595,6 +606,41 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Key commitment ──────────────────────────────────────────────────────────
+
+/// Domain separator for key commitment
+const KEY_COMMITMENT_LABEL: &[u8] = b"dota-v5-key-commitment";
+
+/// Compute a 32-byte commitment over KDF params + public keys, keyed by
+/// the master key. Uses HKDF-Expand with the commitment data as the info string.
+///
+/// This binds the master key to the vault's public parameters, detecting any
+/// tampering (KDF downgrade, key replacement) at unlock time before decryption.
+pub(crate) fn compute_key_commitment(
+    master_key: &MasterKey,
+    kdf: &KdfParams,
+    mlkem_pk: &[u8],
+    x25519_pk: &[u8],
+) -> Vec<u8> {
+    // Build the commitment input: domain || kdf_canonical || public keys
+    let mut info = Vec::new();
+    info.extend_from_slice(KEY_COMMITMENT_LABEL);
+    info.extend_from_slice(kdf.algorithm.as_bytes());
+    info.extend_from_slice(&kdf.salt);
+    info.extend_from_slice(&kdf.time_cost.to_be_bytes());
+    info.extend_from_slice(&kdf.memory_cost.to_be_bytes());
+    info.extend_from_slice(&kdf.parallelism.to_be_bytes());
+    info.extend_from_slice(mlkem_pk);
+    info.extend_from_slice(x25519_pk);
+
+    let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
+        .expect("master key is 32 bytes, valid HKDF PRK");
+    let mut commitment = [0u8; 32];
+    hk.expand(&info, &mut commitment)
+        .expect("32-byte expand always succeeds");
+    commitment.to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +657,8 @@ mod tests {
 
         assert_eq!(unlocked.vault.version, VAULT_VERSION);
         assert_eq!(unlocked.vault.secrets.len(), 0);
+        assert!(unlocked.vault.key_commitment.is_some());
+        assert_eq!(unlocked.vault.min_version, VAULT_VERSION);
     }
 
     #[test]

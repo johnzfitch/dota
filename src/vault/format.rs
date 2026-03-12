@@ -4,21 +4,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Minimum vault version we can still read (v4 vaults lack key_commitment
-/// and are auto-upgraded on next save).
-pub const MIN_VAULT_VERSION: u32 = 4;
+/// Minimum vault version we can still read (older vaults are rejected).
+#[allow(dead_code)]
+pub const MIN_VAULT_VERSION: u32 = 1;
 
 /// Vault file format version
 ///
-/// v3 → v4: Purpose-labeled HKDF-Expand for key wrapping (key separation).
-///           The master key is no longer used directly as an AES key. Instead,
-///           separate wrapping keys are derived via HKDF-Expand with distinct
-///           purpose labels for ML-KEM and X25519 private key encryption.
-///
-/// v4 → v5: HMAC-SHA256 key commitment over KDF params + public keys.
-///           Detects tampering (KDF downgrade, key replacement) at unlock time
-///           before any decryption is attempted. Also migrated pqcrypto-kyber
-///           to pqcrypto-mlkem for FIPS 203 alignment.
+/// v1: X25519 only, master key used directly as AES key, no ML-KEM
+/// v2: Added hybrid KEM (ML-KEM-768 + X25519), flat field layout
+/// v3: Nested struct layout (KemKeyPair, X25519KeyPair), same crypto as v2
+/// v4: Purpose-labeled HKDF-Expand for key wrapping (key separation)
+/// v5: Key commitment (HMAC-SHA256), migration metadata, min_version anti-rollback
 pub const VAULT_VERSION: u32 = 5;
 
 /// Top-level vault structure
@@ -28,7 +24,7 @@ pub struct Vault {
     pub created: DateTime<Utc>,
     pub kdf: KdfParams,
     /// HMAC-SHA256 commitment over KDF params + public keys, keyed by master key.
-    /// Absent in v4 vaults (auto-added on next save).
+    /// Absent in v4 vaults (auto-added on migration/next save).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -38,6 +34,20 @@ pub struct Vault {
     pub kem: KemKeyPair,
     pub x25519: X25519KeyPair,
     pub secrets: HashMap<String, EncryptedSecret>,
+    /// Migration history — set when a vault is upgraded from an older version.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub migrated_from: Option<MigrationInfo>,
+    /// Anti-rollback floor: vault cannot be opened by versions older than this.
+    #[serde(default)]
+    pub min_version: u32,
+}
+
+/// Tracks vault migration history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationInfo {
+    pub original_version: u32,
+    pub migrated_at: DateTime<Utc>,
+    pub migration_path: Vec<u32>,
 }
 
 /// KDF parameters for passphrase derivation
@@ -91,7 +101,7 @@ pub struct EncryptedSecret {
 }
 
 /// Helper module for base64 serialization
-mod base64_serde {
+pub(crate) mod base64_serde {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -167,6 +177,8 @@ mod tests {
                 private_key_nonce: vec![10; 12],
             },
             secrets: HashMap::new(),
+            migrated_from: None,
+            min_version: VAULT_VERSION,
         };
 
         let json = serde_json::to_string_pretty(&vault).unwrap();
@@ -175,5 +187,7 @@ mod tests {
         assert_eq!(vault.version, deserialized.version);
         assert_eq!(vault.kdf.salt, deserialized.kdf.salt);
         assert_eq!(vault.kem.public_key, deserialized.kem.public_key);
+        assert_eq!(vault.key_commitment, deserialized.key_commitment);
+        assert_eq!(vault.min_version, deserialized.min_version);
     }
 }

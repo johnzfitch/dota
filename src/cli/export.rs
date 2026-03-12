@@ -10,7 +10,7 @@ use zeroize::Zeroize;
 pub fn handle_export_env(vault_path: Option<String>, names: Vec<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault — passphrase zeroized on drop
+    // Unlock vault
     let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
@@ -33,7 +33,7 @@ pub fn handle_export_env(vault_path: Option<String>, names: Vec<String>) -> Resu
 
         match get_secret(&unlocked, &name) {
             Ok(value) => {
-                // Shell-escape the value — escaped copy is also zeroized
+                // Shell-escape the value
                 let mut escaped = shell_escape(value.expose());
                 // Note: name is already validated by is_shell_var_name to contain only
                 // [A-Za-z_][A-Za-z0-9_]*, so it's safe to use directly without quoting

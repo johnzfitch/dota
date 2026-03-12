@@ -64,4 +64,7 @@ pub enum Commands {
 
     /// Show vault information
     Info,
+
+    /// Upgrade vault to latest format version
+    Upgrade,
 }

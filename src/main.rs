@@ -52,6 +52,9 @@ fn main() -> Result<()> {
         Some(Commands::Info) => {
             cli::commands::handle_info(args.vault)?;
         }
+        Some(Commands::Upgrade) => {
+            cli::commands::handle_upgrade(args.vault)?;
+        }
         None => {
             // Default: launch TUI
             let vault_path = args.vault.unwrap_or_else(vault::ops::default_vault_path);
