@@ -83,7 +83,7 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
                 SecretString::new(trimmed)
             }
         }
-    });
+    };
 
     // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
     let passphrase = read_passphrase("Vault passphrase: ")?;

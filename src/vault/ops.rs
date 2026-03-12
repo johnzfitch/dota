@@ -1,6 +1,6 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
-use super::format::{EncryptedSecret, KdfParams, KemKeyPair, VAULT_VERSION, Vault, X25519KeyPair};
+use super::format::{EncryptedSecret, KdfParams, KemKeyPair, MIN_VAULT_VERSION, VAULT_VERSION, Vault, X25519KeyPair};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -31,9 +31,6 @@ const MIN_MEMORY_COST_KIB: u32 = 8 * 1024;
 const MAX_MEMORY_COST_KIB: u32 = 256 * 1024;
 const MIN_PARALLELISM: u32 = 1;
 const MAX_PARALLELISM: u32 = 32;
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -225,9 +222,7 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
         .context("Failed to decrypt X25519 private key (wrong passphrase?)")?,
     );
     let x25519_private = X25519PrivateKey::from_bytes(
-        x25519_sk_bytes
-            .as_ref()
-            .try_into()
+        <&[u8] as TryInto<[u8; 32]>>::try_into(x25519_sk_bytes.as_ref())
             .context("Invalid X25519 key length")?,
     );
 
@@ -573,10 +568,9 @@ pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     hk.expand(WRAP_LABEL_X25519, x25519_key.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expand for X25519 wrapping key failed: {}", e))?;
 
-<<<<<<< HEAD
     let keys = WrappingKeys {
-        mlkem: AesKey::from_bytes(mlkem_key),
-        x25519: AesKey::from_bytes(x25519_key),
+        mlkem: AesKey::from_bytes(*mlkem_key),
+        x25519: AesKey::from_bytes(*x25519_key),
     };
     // Zeroize stack temporaries — data now lives inside AesKey (ZeroizeOnDrop)
     mlkem_key.zeroize();
@@ -597,7 +591,7 @@ const KEY_COMMITMENT_LABEL: &[u8] = b"dota-v5-key-commitment";
 ///
 /// This binds the master key to the vault's public parameters, detecting any
 /// tampering (KDF downgrade, key replacement) at unlock time before decryption.
-fn compute_key_commitment(
+pub(crate) fn compute_key_commitment(
     master_key: &MasterKey,
     kdf: &KdfParams,
     mlkem_pk: &[u8],
@@ -664,41 +658,6 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     save_vault_file(vault_path, &vault)?;
 
     Ok(())
-}
-
-// ── Key commitment ──────────────────────────────────────────────────────────
-
-/// Domain separator for key commitment
-const KEY_COMMITMENT_LABEL: &[u8] = b"dota-v5-key-commitment";
-
-/// Compute a 32-byte commitment over KDF params + public keys, keyed by
-/// the master key. Uses HKDF-Expand with the commitment data as the info string.
-///
-/// This binds the master key to the vault's public parameters, detecting any
-/// tampering (KDF downgrade, key replacement) at unlock time before decryption.
-pub(crate) fn compute_key_commitment(
-    master_key: &MasterKey,
-    kdf: &KdfParams,
-    mlkem_pk: &[u8],
-    x25519_pk: &[u8],
-) -> Vec<u8> {
-    // Build the commitment input: domain || kdf_canonical || public keys
-    let mut info = Vec::new();
-    info.extend_from_slice(KEY_COMMITMENT_LABEL);
-    info.extend_from_slice(kdf.algorithm.as_bytes());
-    info.extend_from_slice(&kdf.salt);
-    info.extend_from_slice(&kdf.time_cost.to_be_bytes());
-    info.extend_from_slice(&kdf.memory_cost.to_be_bytes());
-    info.extend_from_slice(&kdf.parallelism.to_be_bytes());
-    info.extend_from_slice(mlkem_pk);
-    info.extend_from_slice(x25519_pk);
-
-    let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
-        .expect("master key is 32 bytes, valid HKDF PRK");
-    let mut commitment = [0u8; 32];
-    hk.expand(&info, &mut commitment)
-        .expect("32-byte expand always succeeds");
-    commitment.to_vec()
 }
 
 fn validate_vault_kdf(vault: &Vault) -> Result<()> {
@@ -861,7 +820,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< ours
     fn test_unlock_rejects_oversized_kdf_memory() {
         let tmp = NamedTempFile::new().unwrap();
         let vault_path = tmp.path().to_str().unwrap();
