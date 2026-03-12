@@ -17,6 +17,9 @@ use std::io::Write;
 use std::path::Path;
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 const KDF_ALGORITHM: &str = "argon2id";
 const SECRET_ALGORITHM: &str = "hybrid-mlkem768-x25519";
 const KEM_ALGORITHM: &str = "ML-KEM-768";
@@ -28,6 +31,9 @@ const MIN_MEMORY_COST_KIB: u32 = 8 * 1024;
 const MAX_MEMORY_COST_KIB: u32 = 256 * 1024;
 const MIN_PARALLELISM: u32 = 1;
 const MAX_PARALLELISM: u32 = 32;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Default vault file path
 pub fn default_vault_path() -> String {
@@ -135,6 +141,13 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
+    let vault_path_ref = Path::new(vault_path);
+    if let Ok(meta) = fs::symlink_metadata(vault_path_ref)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!("Refusing to read vault through symlink: {}", vault_path);
+    }
+
     // Read and parse vault file, migrating if needed
     let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
 
@@ -487,6 +500,19 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     }
 
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        fs::create_dir_all(parent).context("Failed to create vault directory")?;
+    }
+
+    #[cfg(unix)]
+    if parent.exists() {
+        let mut perms = fs::metadata(parent)
+            .context("Failed to inspect vault directory permissions")?
+            .permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(parent, perms).context("Failed to secure vault directory")?;
+    }
+
     let json = serde_json::to_string_pretty(vault).context("Failed to serialize vault")?;
 
     let mut tmp = tempfile::Builder::new()
@@ -502,6 +528,19 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
 
     tmp.persist(vault_path)
         .context("Failed to persist vault file")?;
+
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(vault_path)
+            .context("Failed to inspect vault file permissions")?
+            .permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(vault_path, perms).context("Failed to secure vault file")?;
+    }
+
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
 
     Ok(())
 }
@@ -822,6 +861,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< ours
     fn test_unlock_rejects_oversized_kdf_memory() {
         let tmp = NamedTempFile::new().unwrap();
         let vault_path = tmp.path().to_str().unwrap();
@@ -853,5 +893,33 @@ mod tests {
 
         let err = get_secret(&unlocked, "API_KEY").unwrap_err();
         assert!(err.to_string().contains("Unsupported secret algorithm"));
+    }
+
+    #[test]
+    fn test_unlock_vault_rejects_symlink_path() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("real-vault.json");
+        let symlink = dir.path().join("vault.json");
+
+        create_vault("test-passphrase", target.to_str().unwrap()).unwrap();
+        unix_fs::symlink(&target, &symlink).unwrap();
+
+        let result = unlock_vault("test-passphrase", symlink.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("symlink"));
+    }
+
+    #[test]
+    fn test_create_vault_sets_restrictive_permissions() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        create_vault("test-passphrase", vault_path).unwrap();
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(vault_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }
