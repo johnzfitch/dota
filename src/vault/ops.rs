@@ -287,49 +287,30 @@ fn decrypt_vault_private_keys(
 
 /// Add or update a secret in the vault
 pub fn set_secret(unlocked: &mut UnlockedVault, name: &str, value: &str) -> Result<()> {
-    // Parse public keys
-    let mlkem_public = MlKemPublicKey::from_bytes(unlocked.vault.kem.public_key.clone())?;
-    let x25519_public = X25519PublicKey::from_bytes(
-        unlocked
-            .vault
-            .x25519
-            .public_key
-            .as_slice()
-            .try_into()
-            .context("Invalid X25519 public key length")?,
-    );
-
-    // Hybrid encapsulate to get per-secret AES key
-    let encap = hybrid_encapsulate(&mlkem_public, &x25519_public)?;
-
-    // Encrypt the secret value with derived AES key
-    let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, value.as_bytes())?;
-
-    // Store encrypted secret
-    let now = Utc::now();
-    let created = unlocked
-        .vault
-        .secrets
-        .get(name)
-        .map(|existing| existing.created)
-        .unwrap_or(now);
-
-    unlocked.vault.secrets.insert(
-        name.to_string(),
-        EncryptedSecret {
-            algorithm: expected_secret_algorithm(&unlocked.vault)?.to_string(),
-            kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
-            x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
-            nonce: nonce.to_vec(),
-            ciphertext,
-            created,
-            modified: now,
-        },
-    );
+    let write_context = prepare_secret_write_context(unlocked)?;
+    insert_secret_value(unlocked, &write_context, name, value)?;
 
     // Save vault
     save_vault(unlocked)?;
 
+    Ok(())
+}
+
+/// Add or update multiple secrets and save the vault once.
+pub fn set_secret_entries(
+    unlocked: &mut UnlockedVault,
+    entries: Vec<(String, SecretString)>,
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let write_context = prepare_secret_write_context(unlocked)?;
+    for (name, value) in &entries {
+        insert_secret_value(unlocked, &write_context, name, value.expose())?;
+    }
+
+    save_vault(unlocked)?;
     Ok(())
 }
 
@@ -512,6 +493,26 @@ pub fn remove_secret(unlocked: &mut UnlockedVault, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove multiple secrets and save the vault once.
+pub fn remove_secrets(unlocked: &mut UnlockedVault, names: Vec<String>) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    for name in &names {
+        if !unlocked.vault.secrets.contains_key(name) {
+            anyhow::bail!("Secret '{}' not found", name);
+        }
+    }
+
+    for name in names {
+        unlocked.vault.secrets.remove(&name);
+    }
+
+    save_vault(unlocked)?;
+    Ok(())
+}
+
 /// List all secret names
 pub fn list_secrets(unlocked: &UnlockedVault) -> Vec<String> {
     let mut names: Vec<String> = unlocked.vault.secrets.keys().cloned().collect();
@@ -522,6 +523,61 @@ pub fn list_secrets(unlocked: &UnlockedVault) -> Vec<String> {
 /// Save vault to disk
 fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
     save_vault_file(&unlocked.path, &unlocked.vault)?;
+
+    Ok(())
+}
+
+struct SecretWriteContext {
+    mlkem_public: MlKemPublicKey,
+    x25519_public: X25519PublicKey,
+    algorithm: String,
+}
+
+fn prepare_secret_write_context(unlocked: &UnlockedVault) -> Result<SecretWriteContext> {
+    Ok(SecretWriteContext {
+        mlkem_public: MlKemPublicKey::from_bytes(unlocked.vault.kem.public_key.clone())?,
+        x25519_public: X25519PublicKey::from_bytes(
+            unlocked
+                .vault
+                .x25519
+                .public_key
+                .as_slice()
+                .try_into()
+                .context("Invalid X25519 public key length")?,
+        ),
+        algorithm: expected_secret_algorithm(&unlocked.vault)?.to_string(),
+    })
+}
+
+fn insert_secret_value(
+    unlocked: &mut UnlockedVault,
+    write_context: &SecretWriteContext,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    let encap = hybrid_encapsulate(&write_context.mlkem_public, &write_context.x25519_public)?;
+    let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, value.as_bytes())?;
+
+    let now = Utc::now();
+    let created = unlocked
+        .vault
+        .secrets
+        .get(name)
+        .map(|existing| existing.created)
+        .unwrap_or(now);
+
+    unlocked.vault.secrets.insert(
+        name.to_string(),
+        EncryptedSecret {
+            algorithm: write_context.algorithm.clone(),
+            kem_ciphertext: encap.kem_ciphertext.as_bytes().to_vec(),
+            x25519_ephemeral_public: encap.x25519_ephemeral_public.as_bytes().to_vec(),
+            nonce: nonce.to_vec(),
+            ciphertext,
+            created,
+            modified: now,
+        },
+    );
 
     Ok(())
 }
