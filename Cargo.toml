@@ -1,19 +1,21 @@
 [package]
 name = "dota"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["zack"]
-description = "Defense of the Artifacts - Post-quantum secure secrets manager with TUI"
+description = "Defense of the Artifacts - Post-quantum secure secrets manager with v6 ML-KEM-768 + X25519 vaults"
 license = "MIT"
 
 [dependencies]
 # Cryptography - Post-quantum and classical
+ml-kem = { version = "0.3.0-rc.0", features = ["getrandom", "zeroize"] }
 pqcrypto-kyber = "0.8"
 pqcrypto-traits = "0.3"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 zeroize = { version = "1.7", features = ["derive"] }
 rand = "0.8"

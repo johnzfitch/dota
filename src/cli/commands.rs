@@ -9,6 +9,17 @@ use anyhow::Result;
 use rpassword::prompt_password;
 use zeroize::Zeroize;
 
+fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str {
+    match (vault.version, vault.key_commitment.is_some()) {
+        (6.., true) => "HMAC-SHA256 (present)",
+        (6.., false) => "HMAC-SHA256 (absent)",
+        (5, true) => "legacy HKDF-based v5 commitment (present)",
+        (5, false) => "legacy HKDF-based v5 commitment (absent)",
+        (_, true) => "present",
+        (_, false) => "absent",
+    }
+}
+
 /// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
 /// Returns a SecretString for automatic zeroization on drop.
 fn read_passphrase(prompt: &str) -> Result<SecretString> {
@@ -174,21 +185,17 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
         unlocked.vault.created.format("%Y-%m-%d %H:%M:%S")
     );
     println!("Secrets:       {}", unlocked.vault.secrets.len());
-    if unlocked.vault.min_version > 0 {
-        println!("Min version:   {}", unlocked.vault.min_version);
-    }
+    println!("Min version:   {}", unlocked.vault.min_version);
+    println!("Suite:         {}", unlocked.vault.suite);
     println!(
-        "Key commitment: {}",
-        if unlocked.vault.key_commitment.is_some() {
-            "present"
-        } else {
-            "absent"
-        }
+        "Header auth:   {}",
+        describe_key_commitment(&unlocked.vault)
     );
     println!();
     println!("Cryptography");
     println!("─────────────────");
     println!("KEM:           {}", unlocked.vault.kem.algorithm);
+    println!("X25519:        {}", unlocked.vault.x25519.algorithm);
     println!(
         "KDF:           {} (t={}, m={}, p={})",
         unlocked.vault.kdf.algorithm,
@@ -197,7 +204,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
         unlocked.vault.kdf.parallelism,
     );
     println!("Encryption:    AES-256-GCM");
-    println!("Key Derivation: HKDF-SHA256");
+    println!("Hybrid KDF:    HKDF-SHA256");
 
     if let Some(ref info) = unlocked.vault.migrated_from {
         println!();

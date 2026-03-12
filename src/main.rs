@@ -1,6 +1,8 @@
 //! Defense of the Artifacts (dota)
 //!
-//! Post-quantum secure secrets manager with hybrid ML-KEM-768 + X25519 encryption
+//! Post-quantum secure secrets manager that writes `v6` vaults under real
+//! FIPS 203 ML-KEM-768 + X25519 encryption and migrates legacy vaults forward
+//! on unlock.
 
 mod cli;
 mod crypto;

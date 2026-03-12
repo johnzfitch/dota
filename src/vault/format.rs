@@ -14,8 +14,20 @@ pub const MIN_VAULT_VERSION: u32 = 1;
 /// v2: Added hybrid KEM (ML-KEM-768 + X25519), flat field layout
 /// v3: Nested struct layout (KemKeyPair, X25519KeyPair), same crypto as v2
 /// v4: Purpose-labeled HKDF-Expand for key wrapping (key separation)
-/// v5: Key commitment (HMAC-SHA256), migration metadata, min_version anti-rollback
-pub const VAULT_VERSION: u32 = 5;
+/// v5: Key commitment (HKDF-based legacy commitment), migration metadata,
+///     min_version anti-rollback, legacy Kyber semantics
+/// v6: Real ML-KEM cutover, authenticated suite metadata, explicit X25519
+///     algorithm labeling, and real HMAC-SHA256 commitment.
+pub const V5_VAULT_VERSION: u32 = 5;
+pub const V6_VAULT_VERSION: u32 = 6;
+pub const VAULT_VERSION: u32 = V6_VAULT_VERSION;
+
+#[allow(dead_code)]
+pub const V6_KEM_ALGORITHM: &str = "ML-KEM-768";
+pub const V6_X25519_ALGORITHM: &str = "X25519";
+#[allow(dead_code)]
+pub const V6_SECRET_ALGORITHM: &str = "hybrid-mlkem768-fips203-x25519";
+pub const V6_SUITE: &str = "dota-v6-hybrid-mlkem768-x25519-aes256gcm";
 
 /// Top-level vault structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +46,9 @@ pub struct Vault {
     pub kem: KemKeyPair,
     pub x25519: X25519KeyPair,
     pub secrets: HashMap<String, EncryptedSecret>,
+    /// v6+ cipher-suite identifier. Empty/missing for legacy vaults.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub suite: String,
     /// Migration history — set when a vault is upgraded from an older version.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub migrated_from: Option<MigrationInfo>,
@@ -76,6 +91,9 @@ pub struct KemKeyPair {
 /// X25519 keypair (public key + encrypted private key)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct X25519KeyPair {
+    /// v6+ algorithm label. Empty/missing for legacy vaults.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub algorithm: String,
     #[serde(with = "base64_serde")]
     pub public_key: Vec<u8>,
     #[serde(with = "base64_serde")]
@@ -122,7 +140,7 @@ pub(crate) mod base64_serde {
 }
 
 /// Helper module for optional base64-encoded fields
-mod opt_base64_serde {
+pub(crate) mod opt_base64_serde {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -151,6 +169,7 @@ mod opt_base64_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn test_vault_serialization_round_trip() {
@@ -172,11 +191,13 @@ mod tests {
                 private_key_nonce: vec![7; 12],
             },
             x25519: X25519KeyPair {
+                algorithm: V6_X25519_ALGORITHM.to_string(),
                 public_key: vec![8; 32],
                 encrypted_private_key: vec![9; 32],
                 private_key_nonce: vec![10; 12],
             },
             secrets: HashMap::new(),
+            suite: V6_SUITE.to_string(),
             migrated_from: None,
             min_version: VAULT_VERSION,
         };
@@ -189,5 +210,41 @@ mod tests {
         assert_eq!(vault.kem.public_key, deserialized.kem.public_key);
         assert_eq!(vault.key_commitment, deserialized.key_commitment);
         assert_eq!(vault.min_version, deserialized.min_version);
+        assert_eq!(vault.x25519.algorithm, deserialized.x25519.algorithm);
+        assert_eq!(vault.suite, deserialized.suite);
+    }
+
+    #[test]
+    fn test_legacy_v5_json_defaults_new_v6_fields() {
+        let json = serde_json::json!({
+            "version": 5,
+            "created": "2026-01-01T00:00:00Z",
+            "kdf": {
+                "algorithm": "argon2id",
+                "salt": "AQIDBA==",
+                "time_cost": 3,
+                "memory_cost": 65536,
+                "parallelism": 4
+            },
+            "key_commitment": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+            "kem": {
+                "algorithm": "ML-KEM-768",
+                "public_key": base64::engine::general_purpose::STANDARD.encode(vec![5u8; 1184]),
+                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(vec![6u8; 2400]),
+                "private_key_nonce": base64::engine::general_purpose::STANDARD.encode(vec![7u8; 12])
+            },
+            "x25519": {
+                "public_key": base64::engine::general_purpose::STANDARD.encode(vec![8u8; 32]),
+                "encrypted_private_key": base64::engine::general_purpose::STANDARD.encode(vec![9u8; 32]),
+                "private_key_nonce": base64::engine::general_purpose::STANDARD.encode(vec![10u8; 12])
+            },
+            "secrets": {},
+            "min_version": 5
+        })
+        .to_string();
+
+        let vault: Vault = serde_json::from_str(&json).unwrap();
+        assert!(vault.suite.is_empty());
+        assert!(vault.x25519.algorithm.is_empty());
     }
 }
