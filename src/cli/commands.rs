@@ -276,13 +276,10 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     }
 
     // Read vault to check version before prompting for passphrase
-    let json =
-        std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
+    let json = std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
     let probe: serde_json::Value =
         serde_json::from_str(&json).context("Failed to parse vault file")?;
-    let version = probe["version"]
-        .as_u64()
-        .context("Missing version field")?;
+    let version = probe["version"].as_u64().context("Missing version field")?;
 
     use crate::vault::format::VAULT_VERSION;
     if version >= VAULT_VERSION as u64 {
@@ -293,19 +290,13 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "Upgrading vault from v{} to v{}...",
-        version, VAULT_VERSION
-    );
+    println!("Upgrading vault from v{} to v{}...", version, VAULT_VERSION);
     let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
 
     // unlock_vault handles migration automatically
     let _unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
-    println!(
-        "Vault upgraded successfully to v{}.",
-        VAULT_VERSION
-    );
+    println!("Vault upgraded successfully to v{}.", VAULT_VERSION);
     Ok(())
 }
 
