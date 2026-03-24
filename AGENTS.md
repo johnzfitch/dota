@@ -49,7 +49,7 @@ RUST_LOG=debug cargo run
 | Path | Purpose |
 |------|---------|
 | `src/main.rs` | CLI entry point and command routing |
-| `src/crypto/hybrid.rs` | Hybrid KEM (ML-KEM-768 + X25519) |
+| `src/crypto/hybrid.rs` | TC-HKEM (ML-KEM-768 + X25519 with ciphertext binding + passphrase commitment) |
 | `src/crypto/mlkem.rs` | ML-KEM-768 wrapper (post-quantum) |
 | `src/crypto/legacy_kyber.rs` | Read-only legacy Kyber compatibility for `v2-v5` migration |
 | `src/crypto/x25519.rs` | X25519 ECDH wrapper (classical) |
@@ -73,7 +73,7 @@ RUST_LOG=debug cargo run
 └────────┬────────┘
          │
 ┌────────▼────────┐
-│ crypto::hybrid  │  Hybrid KEM (combines ML-KEM + X25519)
+│ crypto::hybrid  │  TC-HKEM (combines ML-KEM + X25519 + mk binding)
 └───┬─────────┬───┘
     │         │
 ┌───▼───┐ ┌──▼────┐
@@ -103,5 +103,6 @@ cargo test crypto::hybrid
 - All crypto types implement `Zeroize` and `Drop` for memory safety
 - Vault files are JSON but contain base64-encoded binary data
 - Test vectors use fixed seeds; production uses `OsRng`
-- The current on-disk format is `v6`; legacy `v1-v5` vaults are migration-only inputs and are rewritten to `v6` on unlock
-- `v6` authenticates `version`, `min_version`, KDF params, both algorithm ids, both public keys, and `suite` with an HMAC-SHA256 header commitment before any private-key decryption
+- The current on-disk format is `v7`; legacy `v1-v6` vaults are migration-only inputs and are rewritten to `v7` on unlock
+- `v7` authenticates `version`, `min_version`, KDF params, both algorithm ids, both public keys, and `suite` with an HMAC-SHA256 header commitment before any private-key decryption
+- `v7` TC-HKEM binds ciphertexts and the passphrase-derived master key into every per-secret key derivation (best-of-both-worlds IND-CCA + passphrase commitment)

@@ -717,7 +717,7 @@ fn parse_kdf_params(json: &str) -> Result<KdfConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::hybrid::hybrid_decapsulate_v7;
+    use crate::crypto::hybrid::{hybrid_decapsulate_v6, hybrid_decapsulate_v7};
     use crate::crypto::legacy_kyber;
     use crate::crypto::{aes_encrypt, derive_key, generate_salt, x25519_generate_keypair};
     use crate::vault::format::{V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM};

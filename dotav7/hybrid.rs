@@ -520,8 +520,8 @@ mod tests {
         // Even with identical shared secrets, the ciphertext binding + τ
         // in v7 IKM ensure the outputs diverge.
         let mk = [0x42; 32];
-        let (mlkem_pk, _mlkem_sk) = mlkem::generate_keypair().unwrap();
-        let (x25519_pk, _x25519_sk) = x25519::generate_keypair();
+        let (mlkem_pk, mlkem_sk) = mlkem::generate_keypair().unwrap();
+        let (x25519_pk, x25519_sk) = x25519::generate_keypair();
 
         let encap_v7 = hybrid_encapsulate_v7(&mlkem_pk, &x25519_pk, &mk).unwrap();
         let encap_v6 = hybrid_encapsulate_v6(&mlkem_pk, &x25519_pk).unwrap();

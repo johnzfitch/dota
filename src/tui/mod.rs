@@ -1,5 +1,6 @@
 //! Minimal interactive vault shell used as the default unlock mode.
-//! The Phase 6 ratatui implementation will replace this text mode flow.
+//! The ratatui module remains in-tree, but the shipped unlock path currently
+//! enters this text-mode shell.
 
 pub mod app;
 

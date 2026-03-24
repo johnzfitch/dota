@@ -1,6 +1,6 @@
 # Defense of the Artifacts (dota)
 
-> Post-quantum secure secrets manager with hybrid ML-KEM-768 + X25519 encryption
+> Post-quantum secure secrets manager with TC-HKEM (ML-KEM-768 + X25519) encryption
 
 ## Docs
 
@@ -11,7 +11,7 @@
 ## Code
 
 - [Main](./src/main.rs): CLI entry point
-- [Hybrid KEM](./src/crypto/hybrid.rs): ML-KEM-768 + X25519 combination
+- [TC-HKEM](./src/crypto/hybrid.rs): ML-KEM-768 + X25519 TC-HKEM combination
 - [Vault ops](./src/vault/ops.rs): Load, save, CRUD operations
 - [TUI](./src/tui/app.rs): Terminal user interface
 
