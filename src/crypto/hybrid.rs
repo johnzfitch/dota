@@ -528,7 +528,10 @@ mod tests {
 
         // Different ciphertexts → definitely different keys, but even the
         // combiner structure differs so this is guaranteed.
-        assert_ne!(encap_v7.derived_key.as_bytes(), encap_v6.derived_key.as_bytes());
+        assert_ne!(
+            encap_v7.derived_key.as_bytes(),
+            encap_v6.derived_key.as_bytes()
+        );
     }
 
     #[test]
@@ -537,17 +540,10 @@ mod tests {
         let kem_ss = [0x11; 32];
         let x25519_ss = [0x22; 32];
         let kem_ct = [0x33; 1088]; // ML-KEM-768 ciphertext
-        let eph_pk = [0x44; 32];   // X25519 public key
+        let eph_pk = [0x44; 32]; // X25519 public key
         let mk = [0x55; 32];
 
-        let key = combine_shared_secrets_v7(
-            &kem_ss,
-            &x25519_ss,
-            &kem_ct,
-            &eph_pk,
-            &mk,
-        )
-        .unwrap();
+        let key = combine_shared_secrets_v7(&kem_ss, &x25519_ss, &kem_ct, &eph_pk, &mk).unwrap();
 
         // Just verify it produces a valid key — the IKM length is checked
         // implicitly by the successful HKDF operation.

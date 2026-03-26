@@ -499,8 +499,7 @@ fn upvault_v6_to_v7(
         )
         .context("Failed to decrypt v6 ML-KEM private key (wrong passphrase?)")?,
     );
-    let v6_mlkem_private =
-        crate::crypto::MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
+    let v6_mlkem_private = crate::crypto::MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
 
     let x25519_sk_bytes = Zeroizing::new(
         aes_decrypt(
@@ -532,19 +531,15 @@ fn upvault_v6_to_v7(
             );
         }
 
-        let kem_ct = crate::crypto::MlKemCiphertext::from_bytes(
-            secret.kem_ciphertext.clone(),
-        )
-        .with_context(|| format!("Invalid ML-KEM ciphertext for secret '{}'", name))?;
+        let kem_ct = crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone())
+            .with_context(|| format!("Invalid ML-KEM ciphertext for secret '{}'", name))?;
 
         let x25519_eph_pk = X25519PublicKey::from_bytes(
             secret
                 .x25519_ephemeral_public
                 .as_slice()
                 .try_into()
-                .with_context(|| {
-                    format!("Invalid X25519 ephemeral key for secret '{}'", name)
-                })?,
+                .with_context(|| format!("Invalid X25519 ephemeral key for secret '{}'", name))?,
         );
 
         let aes_key = hybrid_decapsulate_v6(
@@ -568,19 +563,14 @@ fn upvault_v6_to_v7(
 
     // Wrap private keys under v7 wrapping labels
     let wrapping = derive_wrapping_keys_v7(master_key)?;
-    let (encrypted_mlkem_sk, mlkem_nonce) =
-        aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
+    let (encrypted_mlkem_sk, mlkem_nonce) = aes_encrypt(&wrapping.mlkem, mlkem_private.as_bytes())?;
     let (encrypted_x25519_sk, x25519_nonce) =
         aes_encrypt(&wrapping.x25519, x25519_private.as_bytes())?;
 
     // Re-encrypt all secrets under v7 TC-HKEM (with passphrase commitment)
     let mut secrets = HashMap::with_capacity(plaintext_secrets.len());
     for (name, plaintext, created, modified) in &plaintext_secrets {
-        let encap = hybrid_encapsulate_v7(
-            &mlkem_public,
-            &x25519_public,
-            master_key.as_bytes(),
-        )?;
+        let encap = hybrid_encapsulate_v7(&mlkem_public, &x25519_public, master_key.as_bytes())?;
         let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, plaintext.as_ref())?;
         secrets.insert(
             name.clone(),
@@ -720,7 +710,9 @@ mod tests {
     use crate::crypto::hybrid::hybrid_decapsulate_v7;
     use crate::crypto::legacy_kyber;
     use crate::crypto::{aes_encrypt, derive_key, generate_salt, x25519_generate_keypair};
-    use crate::vault::format::{V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM};
+    use crate::vault::format::{
+        V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM,
+    };
     use crate::vault::ops::compute_v5_key_commitment;
     use tempfile::tempdir;
 
@@ -1105,7 +1097,8 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let aes_key = hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
+        let aes_key =
+            hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
         let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
         let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "my-secret-value");
@@ -1165,7 +1158,8 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let aes_key = hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
+        let aes_key =
+            hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
         let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
         let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "v3-sample-secret");
@@ -1227,7 +1221,8 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
-        let aes_key = hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
+        let aes_key =
+            hybrid_decapsulate_v7(&mlkem_sk, &x25519_sk, &kem_ct, &eph_pk, mk.as_bytes()).unwrap();
         let nonce: [u8; 12] = secret.nonce.as_slice().try_into().unwrap();
         let plaintext = aes_decrypt(&aes_key, &secret.ciphertext, &nonce).unwrap();
         assert_eq!(String::from_utf8(plaintext).unwrap(), "legacy-v5-secret");
