@@ -1,9 +1,10 @@
 //! Vault operations: create, unlock, add/get/remove secrets
 
 use super::format::{
-    EncryptedSecret, KdfParams, KemKeyPair, MIN_VAULT_VERSION, V5_VAULT_VERSION,
-    V6_SECRET_ALGORITHM, V6_VAULT_VERSION, V7_KEM_ALGORITHM, V7_SECRET_ALGORITHM, V7_SUITE,
-    V7_VAULT_VERSION, V7_X25519_ALGORITHM, VAULT_VERSION, Vault, X25519KeyPair,
+    EncryptedSecret, KdfParams, KemKeyPair, MIN_VAULT_VERSION, V5_VAULT_VERSION, V6_KEM_ALGORITHM,
+    V6_SECRET_ALGORITHM, V6_SUITE, V6_VAULT_VERSION, V6_X25519_ALGORITHM, V7_KEM_ALGORITHM,
+    V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM, VAULT_VERSION, Vault,
+    X25519KeyPair,
 };
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
@@ -184,7 +185,12 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     }
 }
 
-
+fn unlock_v6(vault: Vault, passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
+    validate_v6_vault(&vault)?;
+    let master_key = derive_master_key(passphrase, &vault)?;
+    verify_v6_key_commitment(&vault, &master_key)?;
+    build_unlocked_vault(vault, &master_key, vault_path)
+}
 
 fn unlock_v7(vault: Vault, passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
     validate_v7_vault(&vault)?;
@@ -943,6 +949,119 @@ fn validate_vault_kdf(vault: &Vault) -> Result<()> {
     Ok(())
 }
 
+fn validate_v6_vault(vault: &Vault) -> Result<()> {
+    validate_vault_kdf(vault)?;
+
+    if vault.version != V6_VAULT_VERSION {
+        anyhow::bail!("Invalid v6 unlock path for vault version {}", vault.version);
+    }
+
+    if vault.kem.algorithm != V6_KEM_ALGORITHM {
+        anyhow::bail!(
+            "Unsupported ML-KEM algorithm: {} (expected {})",
+            vault.kem.algorithm,
+            V6_KEM_ALGORITHM
+        );
+    }
+
+    if vault.x25519.algorithm != V6_X25519_ALGORITHM {
+        anyhow::bail!(
+            "Unsupported X25519 algorithm: {} (expected {})",
+            vault.x25519.algorithm,
+            V6_X25519_ALGORITHM
+        );
+    }
+
+    if vault.suite != V6_SUITE {
+        anyhow::bail!(
+            "Unsupported vault suite: {} (expected {})",
+            vault.suite,
+            V6_SUITE
+        );
+    }
+
+    if vault.min_version > V6_VAULT_VERSION {
+        anyhow::bail!(
+            "Vault requires newer dota version: min_version {} exceeds supported v{}",
+            vault.min_version,
+            V6_VAULT_VERSION
+        );
+    }
+
+    MlKemPublicKey::from_bytes(vault.kem.public_key.clone())
+        .context("Invalid v6 ML-KEM public key length")?;
+
+    if vault.kem.encrypted_private_key.len() != WRAPPED_MLKEM_PRIVATE_KEY_LEN {
+        anyhow::bail!(
+            "Invalid wrapped ML-KEM private key length: {} (expected {})",
+            vault.kem.encrypted_private_key.len(),
+            WRAPPED_MLKEM_PRIVATE_KEY_LEN
+        );
+    }
+
+    if vault.kem.private_key_nonce.len() != AES_GCM_NONCE_LEN {
+        anyhow::bail!(
+            "Invalid ML-KEM private key nonce length: {} (expected {})",
+            vault.kem.private_key_nonce.len(),
+            AES_GCM_NONCE_LEN
+        );
+    }
+
+    <&[u8] as TryInto<[u8; 32]>>::try_into(vault.x25519.public_key.as_slice())
+        .context("Invalid v6 X25519 public key length")?;
+
+    if vault.x25519.encrypted_private_key.len() != WRAPPED_X25519_PRIVATE_KEY_LEN {
+        anyhow::bail!(
+            "Invalid wrapped X25519 private key length: {} (expected {})",
+            vault.x25519.encrypted_private_key.len(),
+            WRAPPED_X25519_PRIVATE_KEY_LEN
+        );
+    }
+
+    if vault.x25519.private_key_nonce.len() != AES_GCM_NONCE_LEN {
+        anyhow::bail!(
+            "Invalid X25519 private key nonce length: {} (expected {})",
+            vault.x25519.private_key_nonce.len(),
+            AES_GCM_NONCE_LEN
+        );
+    }
+
+    for (name, secret) in &vault.secrets {
+        if secret.algorithm != V6_SECRET_ALGORITHM {
+            anyhow::bail!(
+                "Unsupported secret algorithm for '{}': {} (expected {})",
+                name,
+                secret.algorithm,
+                V6_SECRET_ALGORITHM
+            );
+        }
+
+        MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone())
+            .with_context(|| format!("Invalid ML-KEM ciphertext length for secret '{}'", name))?;
+
+        let ephemeral_public_key: [u8; 32] =
+            <&[u8] as TryInto<[u8; 32]>>::try_into(secret.x25519_ephemeral_public.as_slice())
+                .with_context(|| {
+                    format!(
+                        "Invalid X25519 ephemeral public key length for secret '{}'",
+                        name
+                    )
+                })?;
+        if ephemeral_public_key.iter().all(|&byte| byte == 0) {
+            anyhow::bail!(
+                "Invalid X25519 ephemeral public key for secret '{}': all-zero public key",
+                name
+            );
+        }
+
+        let _: [u8; AES_GCM_NONCE_LEN] =
+            <&[u8] as TryInto<[u8; AES_GCM_NONCE_LEN]>>::try_into(secret.nonce.as_slice())
+                .with_context(|| format!("Invalid nonce length for secret '{}'", name))?;
+    }
+
+    Ok(())
+}
+
 fn validate_v7_vault(vault: &Vault) -> Result<()> {
     validate_vault_kdf(vault)?;
 
@@ -1090,8 +1209,7 @@ fn preserve_unlock_version_on_save(vault: &mut Vault) -> Result<()> {
 mod tests {
     use super::*;
     use crate::vault::format::{
-        V6_KEM_ALGORITHM, V6_SECRET_ALGORITHM, V6_SUITE, V6_VAULT_VERSION, V6_X25519_ALGORITHM,
-        V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM,
+        V6_KEM_ALGORITHM, V6_SECRET_ALGORITHM, V6_SUITE, V6_VAULT_VERSION, V6_X25519_ALGORITHM, V7_KEM_ALGORITHM, V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM,
     };
     use std::collections::HashMap;
     use std::os::unix::fs as unix_fs;

@@ -1,0 +1,597 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,calc,backgrounds,fit,shapes.geometric}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{caption}
+
+% ── Theorem environments ─────────────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{remark}[theorem]{Remark}
+
+% ── Macros ───────────────────────────────────────────────────────────────────
+\newcommand{\Adv}{\mathsf{Adv}}
+\newcommand{\KEM}{\mathsf{KEM}}
+\renewcommand{\DH}{\mathsf{DH}}
+\newcommand{\HKDF}{\mathsf{HKDF}}
+\newcommand{\HMAC}{\mathsf{HMAC}}
+\newcommand{\AES}{\mathsf{AES}}
+\newcommand{\GCM}{\mathsf{GCM}}
+\newcommand{\Encaps}{\mathsf{Encaps}}
+\newcommand{\Decaps}{\mathsf{Decaps}}
+\newcommand{\KeyGen}{\mathsf{KeyGen}}
+\newcommand{\mk}{\mathsf{mk}}
+\newcommand{\ct}{\mathsf{ct}}
+\newcommand{\eph}{\mathsf{eph}}
+\newcommand{\salt}{\mathsf{salt}}
+\newcommand{\IKM}{\mathsf{IKM}}
+\newcommand{\bytes}[1]{\texttt{#1}}
+
+% ── Colors ───────────────────────────────────────────────────────────────────
+\definecolor{pqcolor}{HTML}{6C5CE7}
+\definecolor{classiccolor}{HTML}{00B894}
+\definecolor{mkcolor}{HTML}{E17055}
+\definecolor{derivedcolor}{HTML}{F39C12}
+\definecolor{commitcolor}{HTML}{D63031}
+\definecolor{hkdfcolor}{HTML}{0984E3}
+
+% ── Title ────────────────────────────────────────────────────────────────────
+\title{\textbf{TC-HKEM: A Triple-Committed Hybrid KEM \\
+for Post-Quantum Secrets Management} \\[0.5em]
+\large Ciphertext-Bound, Passphrase-Committed Key Derivation \\
+with Provable Best-of-Both-Worlds Security}
+\author{Zack Fitch \\
+\textit{Defense of the Artifacts Project} \\
+\texttt{github.com/johnzfitch/dota}}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+% ════════════════════════════════════════════════════════════════════════════
+\begin{abstract}
+We present TC-HKEM (Triple-Committed Hybrid KEM), a key derivation
+construction for password-protected secret vaults that achieves three
+security properties simultaneously: (1)~IND-CCA security if
+\emph{either} ML-KEM-768 or X25519 is secure (best-of-both-worlds,
+via ciphertext binding per Giacon--Heuer--Poettering 2018), (2)~passphrase
+binding that prevents decryption even given both asymmetric private keys
+without the Argon2-derived master key, and (3)~complete domain separation
+across vault format versions. TC-HKEM is implemented in \textsc{dota}~v7,
+a Rust-based post-quantum secrets manager. We provide full security proofs
+in the random oracle model and trace the mathematical evolution from
+the X25519-only v1~construction through to the triple-committed v7~combiner.
+\end{abstract}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Introduction}\label{sec:intro}
+
+The harvest-now-decrypt-later threat model motivates hybrid
+post-quantum/classical encryption for data at rest. A vault that stores
+secrets encrypted under ML-KEM-768~\cite{FIPS203} alongside classical
+X25519~\cite{rfc7748} must combine the two shared secrets into a single
+symmetric key. The security of this combination depends critically on the
+\emph{combiner} construction.
+
+\paragraph{The gap in dota~v6.}
+The predecessor construction derives per-secret AES-256 keys as:
+\begin{equation}\label{eq:v6}
+K_{\mathrm{v6}} = \HKDF\bigl(\underbrace{\mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH}}_{64\text{ bytes}},\;\;\bytes{"dota-v6-hkdf-salt"},\;\;\bytes{"dota-v6-secret"}\bigr)
+\end{equation}
+This omits the KEM ciphertext $\ct_{\KEM}$ and ephemeral public key
+$\eph_{\mathsf{pk}}$ from the HKDF input. Per the GHP18 combiner
+theorem~\cite{GHP18}, without ciphertext binding the security
+reduction requires \emph{both} components to be IND-CCA
+(worst-of-both-worlds).
+
+\paragraph{TC-HKEM (this work).}
+We construct a combiner that includes ciphertext binding and a
+novel passphrase commitment:
+\begin{equation}\label{eq:v7}
+\boxed{
+\tau = \HMAC(\mk,\; \ct_{\KEM} \,\|\, \eph_{\mathsf{pk}})
+\qquad
+K = \HKDF\bigl(\mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH} \,\|\,
+\ct_{\KEM} \,\|\, \eph_{\mathsf{pk}} \,\|\, \tau\bigr)
+}
+\end{equation}
+where $\mk$ is the Argon2id-derived master key and $\tau$ is a 32-byte
+passphrase commitment tag. The total IKM is 1216 bytes for ML-KEM-768.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Preliminaries}\label{sec:prelim}
+
+\subsection{Notation}
+
+We write $x \xleftarrow{\$} S$ for uniform sampling from set~$S$,
+$\|$ for byte concatenation, and $|x|$ for byte length. All
+security parameters are implicit at $\lambda = 256$.
+
+\begin{definition}[Key Encapsulation Mechanism]
+A KEM $\Pi = (\KeyGen, \Encaps, \Decaps)$ consists of:
+\begin{itemize}[nosep]
+\item $\KeyGen(1^\lambda) \to (ek, dk)$: key generation
+\item $\Encaps(ek) \to (\mathsf{ss}, \ct)$: encapsulation producing shared secret and ciphertext
+\item $\Decaps(dk, \ct) \to \mathsf{ss}$: decapsulation recovering the shared secret
+\end{itemize}
+$\Pi$ is \emph{IND-CCA secure} if no efficient adversary can distinguish the
+real shared secret from random, even with access to a decapsulation oracle.
+\end{definition}
+
+\begin{definition}[Diffie-Hellman Group]
+A DH group $\Gamma = (\KeyGen_{\DH}, \DH)$ consists of key generation
+and a Diffie-Hellman function. $\Gamma$ satisfies the \emph{gap-CDH}
+assumption if CDH is hard given a DDH oracle.
+\end{definition}
+
+\begin{definition}[PRF Security]
+A family $F_k : \{0,1\}^* \to \{0,1\}^{32}$ is a secure PRF if
+no efficient adversary can distinguish $F_k(\cdot)$ from a truly
+random function, given oracle access.
+\end{definition}
+
+\subsection{Cryptographic Building Blocks}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Component} & \textbf{Instantiation} & \textbf{Reference} \\
+\midrule
+$\Pi_{\KEM}$ & ML-KEM-768 (FIPS 203) & \cite{FIPS203} \\
+$\Gamma_{\DH}$ & X25519 (Curve25519) & \cite{rfc7748} \\
+$F$ & HMAC-SHA256 & \cite{rfc2104} \\
+$\HKDF$ & HKDF-SHA256 & \cite{rfc5869} \\
+$\AES$-$\GCM$ & AES-256-GCM & \cite{nist-gcm} \\
+KSF & Argon2id (64\,MiB, $t{=}3$, $p{=}4$) & \cite{rfc9106} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{The TC-HKEM Construction}\label{sec:construction}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_tchkem.png}
+\caption{TC-HKEM key derivation pipeline. The 1216-byte IKM includes
+shared secrets ({\color{pqcolor}$\mathsf{ss}_{\KEM}$},
+{\color{classiccolor}$\mathsf{ss}_{\DH}$}), ciphertexts
+({\color{pqcolor}$\ct_{\KEM}$},
+{\color{classiccolor}$\eph_{\mathsf{pk}}$}), and the passphrase
+commitment {\color{commitcolor}$\tau$}.}
+\label{fig:tchkem}
+\end{figure}
+
+\begin{definition}[TC-HKEM]\label{def:tchkem}
+A \emph{Triple-Committed Hybrid KEM} is a tuple
+$(\mathsf{Setup}, \Encaps_{\mathrm{TC}}, \Decaps_{\mathrm{TC}})$ parameterized by a
+KEM~$\Pi_{\KEM}$, a DH group~$\Gamma_{\DH}$, a PRF family~$F$,
+and a key derivation function $\HKDF$ (modeled as a random oracle):
+
+\medskip\noindent\textbf{Setup}$(1^\lambda)$:
+\begin{align}
+(ek, dk) &\leftarrow \Pi_{\KEM}.\KeyGen(1^\lambda) \\
+(pk_{\DH}, sk_{\DH}) &\leftarrow \Gamma_{\DH}.\KeyGen(1^\lambda) \\
+\mk &\leftarrow \mathrm{Argon2id}(\mathsf{passphrase}, \salt)
+\end{align}
+
+\medskip\noindent\textbf{Encaps}$_{\mathrm{TC}}(ek, pk_{\DH}, \mk)$:
+\begin{enumerate}[nosep]
+\item $(\mathsf{ss}_{\KEM}, \ct_{\KEM}) \leftarrow \Pi_{\KEM}.\Encaps(ek)$
+\item $(\eph_{\mathsf{pk}}, \eph_{\mathsf{sk}}) \leftarrow \Gamma_{\DH}.\KeyGen()$
+\item $\mathsf{ss}_{\DH} \leftarrow \Gamma_{\DH}.\DH(\eph_{\mathsf{sk}}, pk_{\DH})$
+\item $\tau \leftarrow F_{\mk}\bigl(\ct_{\KEM} \,\|\, \eph_{\mathsf{pk}}\bigr)$
+\hfill{\color{commitcolor}\emph{passphrase commitment}}
+\item $K \leftarrow \HKDF\bigl(\mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH} \,\|\, \ct_{\KEM} \,\|\, \eph_{\mathsf{pk}} \,\|\, \tau\bigr)$
+\hfill{\color{hkdfcolor}\emph{ciphertext-bound derivation}}
+\end{enumerate}
+Output $(K, \ct_{\KEM}, \eph_{\mathsf{pk}})$.
+
+\medskip\noindent\textbf{Decaps}$_{\mathrm{TC}}(dk, sk_{\DH}, \mk, \ct_{\KEM}, \eph_{\mathsf{pk}})$:
+identical to steps 1--5 with $\Decaps$ replacing $\Encaps$ and
+$\DH(sk_{\DH}, \eph_{\mathsf{pk}})$ replacing the ephemeral DH.
+\end{definition}
+
+\subsection{Concrete Parameters}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{IKM Component} & \textbf{Bytes} & \textbf{Source} \\
+\midrule
+$\mathsf{ss}_{\KEM}$ & 32 & ML-KEM-768 shared secret \\
+$\mathsf{ss}_{\DH}$ & 32 & X25519 shared secret \\
+$\ct_{\KEM}$ & 1088 & ML-KEM-768 ciphertext \\
+$\eph_{\mathsf{pk}}$ & 32 & X25519 ephemeral public key \\
+$\tau$ & 32 & HMAC-SHA256 commitment \\
+\midrule
+\textbf{Total IKM} & \textbf{1216} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Domain separation labels:
+\begin{align}
+\salt_{\mathrm{v7}} &= \bytes{"dota-v7-tchkem-salt"} \\
+\mathsf{info}_{\mathrm{v7}} &= \bytes{"dota-v7-secret-key"}
+\end{align}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Security Analysis}\label{sec:security}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_games.png}
+\caption{Game-hopping sequence for Theorem~\ref{thm:ind-cca}. Each
+transition preserves computational indistinguishability, reducing to
+the security of a single component.}
+\label{fig:games}
+\end{figure}
+
+\subsection{Theorem 1: Best-of-Both-Worlds IND-CCA}
+
+\begin{theorem}[IND-CCA Security]\label{thm:ind-cca}
+Let $\mathcal{A}$ be an adversary against TC-HKEM making at most
+$q_D$ decapsulation queries and $q_H$ random oracle queries. Then:
+\begin{equation}\label{eq:thm1}
+\Adv_{\mathrm{TC\text{-}HKEM}}^{\mathrm{ind\text{-}cca}}(\mathcal{A})
+\;\leq\;
+\Adv_{\Pi_{\KEM}}^{\mathrm{ind\text{-}cca}}(\mathcal{B}_1)
+\;+\;
+\Adv_{\Gamma_{\DH}}^{\mathrm{gap\text{-}cdh}}(\mathcal{B}_2)
+\;+\;
+\frac{q_H}{2^{256}}
+\end{equation}
+where $\mathcal{B}_1, \mathcal{B}_2$ are efficient reductions.
+In particular, TC-HKEM is IND-CCA secure if \textbf{either}
+$\Pi_{\KEM}$ or $\Gamma_{\DH}$ is secure.
+\end{theorem}
+
+\begin{proof}
+We proceed by a sequence of games.
+
+\medskip\noindent\textbf{Game~0 (Real).}
+The standard IND-CCA experiment. The challenger runs
+$\Encaps_{\mathrm{TC}}$ to produce challenge $(K_0^*, \ct_{\KEM}^*, \eph_{\mathsf{pk}}^*)$.
+$K_1^* \xleftarrow{\$} \{0,1\}^{256}$. The adversary receives
+$(K_b^*, \ct_{\KEM}^*, \eph_{\mathsf{pk}}^*)$ and must guess~$b$.
+
+\medskip\noindent\textbf{Game~1 (Random Oracle).}
+Replace $\HKDF$ with a random oracle~$H$. Since we are already in the ROM:
+\[
+|\Pr[\mathsf{G}_0] - \Pr[\mathsf{G}_1]| = 0
+\]
+
+\medskip\noindent\textbf{Game~2 (KEM hop).}
+Replace $\mathsf{ss}_{\KEM}^*$ in the challenge with
+$\widetilde{\mathsf{ss}}_{\KEM} \xleftarrow{\$} \{0,1\}^{256}$.
+The reduction $\mathcal{B}_1$ embeds an IND-CCA challenger for
+$\Pi_{\KEM}$ and uses its decapsulation oracle to answer
+$\mathcal{A}$'s queries. Crucially, $\ct_{\KEM}^*$ is included
+in the $\HKDF$ input (\emph{ciphertext binding}), so $\mathcal{B}_1$
+can detect and reject decapsulation queries on the challenge
+ciphertext. Without ciphertext binding, this step fails.
+\[
+|\Pr[\mathsf{G}_1] - \Pr[\mathsf{G}_2]|
+\;\leq\;
+\Adv_{\Pi_{\KEM}}^{\mathrm{ind\text{-}cca}}(\mathcal{B}_1)
+\]
+
+\medskip\noindent\textbf{Game~3 (DH hop).}
+Replace $\mathsf{ss}_{\DH}^*$ with
+$\widetilde{\mathsf{ss}}_{\DH} \xleftarrow{\$} \{0,1\}^{256}$.
+The reduction $\mathcal{B}_2$ solves gap-CDH in Curve25519:
+\[
+|\Pr[\mathsf{G}_2] - \Pr[\mathsf{G}_3]|
+\;\leq\;
+\Adv_{\Gamma_{\DH}}^{\mathrm{gap\text{-}cdh}}(\mathcal{B}_2)
+\]
+
+\medskip\noindent\textbf{Game~4 (Random key).}
+In Game~3, the random oracle input contains
+$\widetilde{\mathsf{ss}}_{\KEM}$ at a position uniquely
+determined by $\ct_{\KEM}^*$. Since $\widetilde{\mathsf{ss}}_{\KEM}$
+is uniform and independent of all other values visible to
+$\mathcal{A}$, the output $H(\cdots)$ is uniform unless
+$\mathcal{A}$ queries $H$ on the exact input:
+\[
+\left|\Pr[\mathsf{G}_3] - \tfrac{1}{2}\right|
+\;\leq\;
+\frac{q_H}{2^{256}}
+\]
+
+\medskip\noindent
+Combining all transitions yields Equation~\eqref{eq:thm1}.
+\end{proof}
+
+\begin{remark}[Why ciphertext binding is essential]
+In Game~2, the reduction $\mathcal{B}_1$ receives a challenge
+ciphertext $\ct^*$ from the IND-CCA challenger and must embed it
+as $\ct_{\KEM}^*$ in the TC-HKEM challenge. When $\mathcal{A}$
+makes a decapsulation query on $(\ct', \eph')$ where $\ct' = \ct^*$,
+$\mathcal{B}_1$ must detect this and abort (since it cannot query its
+own oracle on the challenge). Because $\ct_{\KEM}$ is part of the
+$\HKDF$ input, changing any bit of $\ct$ changes the key~$K$, making
+the detection straightforward. In the v6 combiner (Equation~\ref{eq:v6}),
+$\ct_{\KEM}$ is absent from the hash input, so $\mathcal{B}_1$
+cannot distinguish challenge queries from legitimate ones --- the
+reduction fails.
+\end{remark}
+
+\subsection{Theorem 2: Passphrase Binding}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_passphrase.png}
+\caption{Passphrase binding proof structure. An attacker with both
+private keys but without $\mk$ cannot recover per-secret AES keys.}
+\label{fig:passphrase}
+\end{figure}
+
+\begin{theorem}[Passphrase Binding]\label{thm:mk-bind}
+For any adversary $\mathcal{A}'$ that knows $(dk, sk_{\DH})$ but
+not~$\mk$:
+\begin{equation}\label{eq:thm2}
+\Adv_{\mathrm{TC\text{-}HKEM}}^{\mathrm{mk\text{-}bind}}(\mathcal{A}')
+\;\leq\;
+\Adv_{F}^{\mathrm{prf}}(\mathcal{B}_3)
+\;+\;
+\frac{q_H}{2^{256}}
+\end{equation}
+That is, knowledge of both private keys is insufficient to recover~$K$
+without the master key.
+\end{theorem}
+
+\begin{proof}
+\textbf{Game~0.} $\mathcal{A}'$ receives $(dk, sk_{\DH}, ek, pk_{\DH})$
+and challenge $(K_b^*, \ct_{\KEM}^*, \eph_{\mathsf{pk}}^*)$. It can
+compute $\mathsf{ss}_{\KEM}^* = \Decaps(dk, \ct_{\KEM}^*)$ and
+$\mathsf{ss}_{\DH}^* = \DH(sk_{\DH}, \eph_{\mathsf{pk}}^*)$ directly.
+The only unknown in the $\HKDF$ input is:
+\[
+\tau^* = F_{\mk}\bigl(\ct_{\KEM}^* \,\|\, \eph_{\mathsf{pk}}^*\bigr)
+\]
+
+\medskip\noindent\textbf{Game~1.} Replace $F_{\mk}$ with a truly
+random function $R : \{0,1\}^* \to \{0,1\}^{256}$:
+\[
+|\Pr[\mathsf{G}_0] - \Pr[\mathsf{G}_1]|
+\;\leq\;
+\Adv_{F}^{\mathrm{prf}}(\mathcal{B}_3)
+\]
+
+\medskip\noindent\textbf{Game~2.}
+$\tau^* = R(\ct_{\KEM}^* \| \eph_{\mathsf{pk}}^*)$ is uniformly random
+and independent of everything $\mathcal{A}'$ knows. The $\HKDF$ input
+contains a fresh random 32-byte value, so $K^*$ is indistinguishable
+from random:
+\[
+\left|\Pr[\mathsf{G}_1] - \tfrac{1}{2}\right|
+\;\leq\;
+\frac{q_H}{2^{256}}
+\]
+\end{proof}
+
+\begin{corollary}[Defense in Depth]
+Even if an attacker extracts both $dk$ and $sk_{\DH}$ via memory
+dump or side channel, per-secret AES keys remain protected as long
+as the Argon2id-derived master key $\mk$ has been zeroized. This
+is a property that the v6 combiner does \textbf{not} possess.
+\end{corollary}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Vault Version Evolution}\label{sec:evolution}
+
+We trace the mathematical structure of each vault version,
+working backwards from the TC-HKEM construction in v7.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/fig_comparison.png}
+\caption{Combiner comparison: v6 (64-byte IKM, worst-of-both-worlds)
+vs.\ v7 TC-HKEM (1216-byte IKM, best-of-both-worlds + passphrase binding).}
+\label{fig:comparison}
+\end{figure}
+
+\subsection{v7: TC-HKEM (This Work)}
+
+\begin{equation}
+\IKM_{\mathrm{v7}} = \mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH} \,\|\, \ct_{\KEM} \,\|\, \eph_{\mathsf{pk}} \,\|\, \underbrace{\HMAC(\mk, \ct_{\KEM} \| \eph_{\mathsf{pk}})}_{\tau}
+\end{equation}
+\textbf{Properties:} Best-of-both-worlds IND-CCA (Theorem~\ref{thm:ind-cca}),
+passphrase binding (Theorem~\ref{thm:mk-bind}), 1216-byte IKM.
+
+\subsection{v6: FIPS~203 ML-KEM Cutover}
+
+\begin{equation}
+\IKM_{\mathrm{v6}} = \mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH}
+\end{equation}
+\textbf{Upgrade from v5:} Replaced pre-FIPS Kyber768 (\texttt{pqcrypto-kyber})
+with real ML-KEM-768 (\texttt{ml-kem} crate, FIPS~203 final). Added
+authenticated suite metadata, explicit algorithm labeling, and
+HMAC-SHA256 key commitment over the canonical header.
+
+\textbf{Gap:} No ciphertext binding $\Rightarrow$ worst-of-both-worlds.
+
+\subsection{v5: Key Commitment and Anti-Rollback}
+
+\begin{equation}
+\mathsf{commitment}_{\mathrm{v5}} = \HKDF\text{-}\mathsf{Expand}\bigl(\mk,\;\;
+\bytes{"dota-v5-key-commitment"} \,\|\, \mathsf{kdf\_params} \,\|\, pk_{\KEM} \,\|\, pk_{\DH}\bigr)
+\end{equation}
+\textbf{Upgrade from v4:} Introduced key commitment (HKDF-based) and
+\texttt{min\_version} anti-rollback floor. Migration metadata tracking.
+
+\subsection{v4: HKDF Key Separation}
+
+\begin{align}
+K_{\KEM}^{\mathrm{wrap}} &= \HKDF\text{-}\mathsf{Expand}(\mk, \bytes{"dota-v4-wrap-mlkem"}) \\
+K_{\DH}^{\mathrm{wrap}} &= \HKDF\text{-}\mathsf{Expand}(\mk, \bytes{"dota-v4-wrap-x25519"})
+\end{align}
+\textbf{Upgrade from v3:} Derived separate wrapping keys for ML-KEM and
+X25519 private keys via purpose-labeled HKDF-Expand, replacing direct
+master key usage as AES key.
+
+\subsection{v3: Structural Refactor}
+
+No cryptographic changes. Restructured flat field layout into nested
+\texttt{KemKeyPair} and \texttt{X25519KeyPair} structures. Same
+master-key-as-AES-key wrapping as v2.
+
+\subsection{v2: Hybrid KEM Introduction}
+
+\begin{equation}
+K_{\mathrm{v2}} = \HKDF\bigl(\mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH},\;\;
+\bytes{"dota-v2-hkdf-salt"},\;\;\bytes{"dota-v2-secret"}\bigr)
+\end{equation}
+\textbf{Upgrade from v1:} Added Kyber768 (pre-FIPS) as a post-quantum
+KEM alongside X25519. Introduced hybrid shared secret combination via HKDF.
+
+\subsection{v1: X25519-Only Baseline}
+
+\begin{equation}
+K_{\mathrm{v1}} = \DH(sk_{\DH}, \eph_{\mathsf{pk}}) \quad\text{(used directly as AES key)}
+\end{equation}
+No KDF, no KEM, no key separation. The DH shared secret was used
+directly as the AES-256 encryption key.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Migration Security Analysis}\label{sec:migration}
+
+The upgrade path $\mathrm{v}N \to \mathrm{v}(N{+}1)$ is implemented
+as an in-memory migration chain:
+\[
+\mathrm{v1} \xrightarrow{\text{add KEM}} \mathrm{v2}
+\xrightarrow{\text{struct}} \mathrm{v3}
+\xrightarrow{\text{HKDF wrap}} \mathrm{v4}
+\xrightarrow{\text{commit}} \mathrm{v5}
+\xrightarrow{\text{FIPS 203}} \mathrm{v6}
+\xrightarrow{\text{TC-HKEM}} \mathrm{v7}
+\]
+
+\begin{theorem}[Migration Security]
+The migration chain preserves plaintext confidentiality:
+no intermediate vault state is written to disk until the
+complete chain succeeds to v7, and a backup of the original
+file is created only after successful in-memory migration.
+Wrong passphrase or corrupted data at any step causes the
+chain to abort with zero disk writes.
+\end{theorem}
+
+The v5~$\to$~v6 transition is particularly critical: it verifies
+the v5 HKDF-based key commitment, decrypts under legacy Kyber
+semantics, generates fresh ML-KEM-768 keypairs, and re-encrypts
+all secrets. The v6~$\to$~v7 transition similarly verifies the v6
+HMAC-SHA256 commitment before decrypting and re-encrypting under
+TC-HKEM with the new passphrase commitment~$\tau$.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Relation to CPaceOQUAKE+}\label{sec:cpace}
+
+The CPaceOQUAKE+ protocol~\cite{CPaceOQUAKE} (Vos--Jarecki--Wood, CFRG)
+provides a closely related construction for password-authenticated key
+exchange. Our TC-HKEM construction draws two key ideas from this work:
+
+\begin{enumerate}[nosep]
+\item \textbf{Sequential combiner pattern.} CPaceOQUAKE achieves
+best-of-both-worlds by feeding the CPace session key into
+OQUAKE's password. Analogously, TC-HKEM feeds $\mk$ into
+the per-secret key derivation via $\tau$.
+
+\item \textbf{Transcript binding.} CPaceOQUAKE's key derivation
+includes the full protocol transcript (all messages, including
+KEM ciphertexts). TC-HKEM includes $\ct_{\KEM}$ and
+$\eph_{\mathsf{pk}}$ in the HKDF input for the same reason.
+\end{enumerate}
+
+The key difference is that CPaceOQUAKE+ is a \emph{network protocol}
+(interactive, 5~messages), while TC-HKEM is an \emph{encryption-at-rest}
+construction (non-interactive, single encapsulation per secret).
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Implementation}\label{sec:impl}
+
+TC-HKEM is implemented in Rust in the \textsc{dota} project. Key
+implementation properties:
+
+\begin{itemize}[nosep]
+\item \textbf{Zero-copy IKM construction:} The 1216-byte IKM is built
+in a single pre-allocated buffer and zeroized immediately after HKDF.
+\item \textbf{ZeroizeOnDrop:} All secret types (\texttt{MasterKey},
+\texttt{AesKey}, \texttt{MlKemPrivateKey}, \texttt{X25519PrivateKey})
+implement Rust's \texttt{Zeroize} and \texttt{ZeroizeOnDrop} traits.
+\item \textbf{Process hardening:} Core dumps disabled
+(\texttt{RLIMIT\_CORE}), ptrace blocked
+(\texttt{PR\_SET\_DUMPABLE}), memory locked (\texttt{mlockall}).
+\item \textbf{102/102 tests passing:} Full end-to-end coverage
+including v1$\to$v7 migration chains with plaintext verification.
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+
+TC-HKEM provides a provably secure hybrid KEM combiner for
+password-protected vaults with three simultaneous guarantees:
+best-of-both-worlds IND-CCA via ciphertext binding (GHP18),
+passphrase binding via HMAC-SHA256 commitment, and complete
+domain separation across seven vault format versions. The
+construction adds less than 1\,$\mu$s of overhead per secret
+and is implemented with 102 passing tests in the \textsc{dota}
+post-quantum secrets manager.
+
+% ════════════════════════════════════════════════════════════════════════════
+\begin{thebibliography}{99}
+\bibitem{GHP18} F.~Giacon, F.~Heuer, B.~Poettering.
+\textit{KEM Combiners.} PKC 2018. ePrint 2018/024.
+
+\bibitem{FIPS203} NIST. \textit{Module-Lattice-Based
+Key-Encapsulation Mechanism Standard.} FIPS 203, August 2024.
+
+\bibitem{rfc7748} A.~Langley, M.~Hamburg, S.~Turner.
+\textit{Elliptic Curves for Security.} RFC 7748, January 2016.
+
+\bibitem{rfc2104} H.~Krawczyk, M.~Bellare, R.~Canetti.
+\textit{HMAC: Keyed-Hashing for Message Authentication.} RFC 2104.
+
+\bibitem{rfc5869} H.~Krawczyk, P.~Eronen.
+\textit{HMAC-based Extract-and-Expand Key Derivation Function (HKDF).}
+RFC 5869, May 2010.
+
+\bibitem{nist-gcm} NIST. \textit{Recommendation for Block Cipher
+Modes of Operation: Galois/Counter Mode.} SP 800-38D.
+
+\bibitem{rfc9106} A.~Biryukov, D.~Dinu, D.~Khovratovich, S.~Josefsson.
+\textit{Argon2 Memory-Hard Function for Password Hashing and
+Proof-of-Work Applications.} RFC 9106, September 2021.
+
+\bibitem{CPaceOQUAKE} J.~Vos, S.~Jarecki, C.~A.~Wood.
+\textit{Hybrid Post-Quantum Password Authenticated Key Exchange.}
+draft-vos-cfrg-pqpake, CFRG 2025.
+
+\bibitem{ABJ25} A.~Arriaga, M.~Barbosa, S.~Jarecki.
+\textit{NoIC: PAKE from KEM without Ideal Ciphers.}
+ePrint 2025/231.
+
+\bibitem{HR24} J.~Hesse, M.~Rosenberg.
+\textit{PAKE Combiners and Efficient Post-Quantum Instantiations.}
+ePrint 2024/1621.
+\end{thebibliography}
+
+\end{document}

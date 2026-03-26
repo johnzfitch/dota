@@ -1,8 +1,8 @@
 # Defense of the Artifacts (dota)
 
-Post-quantum secure secrets manager with `v6` vaults written under real FIPS 203 ML-KEM-768 + X25519, plus a terminal UI.
+Post-quantum secure secrets manager with `v7` TC-HKEM vaults (ML-KEM-768 + X25519 with ciphertext binding and passphrase commitment), plus a terminal UI.
 
-**Defense-in-depth cryptography**: `v6` vaults protect secrets with both classical security (X25519) and post-quantum security (ML-KEM-768). Legacy `v1-v5` vaults remain readable and are migrated in place to `v6` on unlock.
+**Defense-in-depth cryptography**: `v7` vaults protect secrets with both classical security (X25519) and post-quantum security (ML-KEM-768), combined via the TC-HKEM (Triple-Committed Hybrid KEM) construction. Security holds if *either* algorithm is secure. Legacy `v1-v6` vaults remain readable and are migrated in place to `v7` on unlock.
 
 ## Quickstart
 
@@ -29,26 +29,31 @@ flowchart LR
     A[Passphrase] -->|Argon2| B[Master Key]
     B --> C["ML-KEM-768 KEM"]
     B --> D["X25519 ECDH"]
-    C --> E["HKDF-SHA256"]
+    C --> E["TC-HKEM Combiner"]
     D --> E
+    B -->|"HMAC(mk, ct)"| E
     E --> F["AES-256-GCM"]
     F --> G[Encrypted Secrets]
 ```
 
-**Hybrid KEM**: Each secret is encrypted with AES-256-GCM. The per-secret AES key is derived by combining:
+**TC-HKEM**: Each secret is encrypted with AES-256-GCM. The per-secret AES key is derived via the Triple-Committed Hybrid KEM combiner:
 1. ML-KEM-768 (post-quantum KEM) shared secret
 2. X25519 (classical ECDH) shared secret
-3. HKDF-SHA256 with `v6` domain-separated labels
+3. Ciphertext binding (ct_kem and eph_pk included in HKDF input)
+4. Passphrase commitment (HMAC of master key over ciphertexts)
+5. HKDF-SHA256 with `v7` domain-separated labels
 
-The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM ciphertexts. A canonical authenticated header is protected by HMAC-SHA256 under the passphrase-derived master key before any private-key decryption occurs.
+The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM ciphertexts. A canonical authenticated header is protected by HMAC-SHA256 under the passphrase-derived master key before any private-key decryption occurs. The `v7` TC-HKEM combiner achieves best-of-both-worlds IND-CCA security and binds the passphrase into every per-secret key derivation.
 
 ## Features
 
 - **Post-quantum security**: Real ML-KEM-768 (NIST FIPS 203 final standard)
 - **Classical security**: X25519 elliptic curve Diffie-Hellman
+- **Best-of-both-worlds**: TC-HKEM ensures security if *either* algorithm holds
+- **Passphrase binding**: Master key is committed into every per-secret key derivation
 - **Memory safety**: Rust with zeroization of sensitive data
-- **Authenticated metadata**: `version`, `min_version`, algorithm ids, public keys, and suite are covered by the `v6` key commitment
-- **Automatic migration**: Legacy `v1-v5` vaults upgrade to `v6` on unlock
+- **Authenticated metadata**: `version`, `min_version`, algorithm ids, public keys, and suite are covered by the `v7` key commitment
+- **Automatic migration**: Legacy `v1-v6` vaults upgrade to `v7` on unlock
 - **Key rotation**: `dota rotate-keys` re-encrypts all secrets with new keypairs
 - **Export to environment**: `dota export-env VAR1 VAR2` outputs shell-compatible format
 - **TUI and CLI**: Interactive ratatui interface or scriptable commands
@@ -62,7 +67,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 ## Security assumptions
 
 - **Threat model**: Protects against passive adversaries with quantum computers (harvest-now-decrypt-later). Does not protect against active quantum adversaries or compromised endpoints.
-- **Algorithm choices**: `v6` uses ML-KEM-768 for post-quantum resistance, X25519 for classical security, AES-256-GCM for authenticated encryption, HKDF-SHA256 for the hybrid secret combiner, and HMAC-SHA256 for authenticated header commitment.
+- **Algorithm choices**: `v7` uses ML-KEM-768 for post-quantum resistance, X25519 for classical security, AES-256-GCM for authenticated encryption, HKDF-SHA256 for the TC-HKEM combiner, and HMAC-SHA256 for authenticated header commitment and passphrase binding.
 - **Side channels**: No explicit protection against timing or cache attacks (relies on constant-time implementations in dependencies).
 
 <details>
@@ -71,24 +76,25 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 ### Key derivation
 
 1. Passphrase → Argon2id (64 MiB, 3 iterations, 4 threads, 32-byte master key)
-2. Master key → Used to encrypt vault key material and authenticate the `v6` header commitment
+2. Master key → Used to encrypt vault key material, authenticate the `v7` header commitment, and bind the passphrase into per-secret key derivation via TC-HKEM
 3. ML-KEM-768 and X25519 keypairs are generated randomly and stored encrypted in the vault (no deterministic derivation from the master key)
 
 ### Secret encryption
 
 1. Generate static ML-KEM-768 and X25519 recipient keypairs
-2. For each secret:
-   - ML-KEM encapsulation → 32-byte shared secret + ciphertext
-   - X25519 ephemeral DH → 32-byte shared secret + ephemeral public key
-   - HKDF-SHA256(kem_ss || x25519_ss, `dota-v6-hkdf-salt`, `dota-v6-secret`) → 32-byte AES key
+2. For each secret (TC-HKEM):
+   - ML-KEM encapsulation → 32-byte shared secret (ss_kem) + ciphertext (ct_kem)
+   - X25519 ephemeral DH → 32-byte shared secret (ss_dh) + ephemeral public key (eph_pk)
+   - Passphrase tag: tau = HMAC-SHA256(master_key, ct_kem || eph_pk)
+   - HKDF-SHA256(ss_kem || ss_dh || ct_kem || eph_pk || tau, `dota-v7-tchkem-salt`, `dota-v7-secret-key`) → 32-byte AES key
    - AES-256-GCM(plaintext, aes_key, random_nonce) → ciphertext + tag
 
 ### Vault format
 
-JSON structure with versioning (current: v6):
+JSON structure with versioning (current: v7):
 - `version`: Protocol version for forward compatibility
 - `kdf`: Argon2id parameters
-- `key_commitment`: authenticated header commitment
+- `key_commitment`: authenticated header commitment (v7 includes suite in commitment scope)
 - `kem`: ML-KEM-768 public key and encrypted private key
 - `x25519`: X25519 public key, algorithm id, and encrypted private key
 - `suite`: active cipher-suite identifier
