@@ -5,12 +5,12 @@ use super::format::{
     V6_SECRET_ALGORITHM, V6_VAULT_VERSION, V7_KEM_ALGORITHM, V7_SECRET_ALGORITHM, V7_SUITE,
     V7_VAULT_VERSION, V7_X25519_ALGORITHM, VAULT_VERSION, Vault, X25519KeyPair,
 };
+use crate::crypto::hybrid::{hybrid_decapsulate_v7, hybrid_encapsulate_v7};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
     hybrid_decapsulate, hybrid_encapsulate, mlkem_generate_keypair, x25519_generate_keypair,
 };
-use crate::crypto::hybrid::{hybrid_decapsulate_v7, hybrid_encapsulate_v7};
 use crate::security::{self, SecretString, SecretVec};
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -184,8 +184,6 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     }
 }
 
-
-
 fn unlock_v7(vault: Vault, passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
     validate_v7_vault(&vault)?;
     let master_key = derive_master_key(passphrase, &vault)?;
@@ -308,9 +306,11 @@ pub fn set_secret(unlocked: &mut UnlockedVault, name: &str, value: &str) -> Resu
 
     // Hybrid encapsulate to get per-secret AES key
     let encap = match unlocked.vault.version {
-        V7_VAULT_VERSION => {
-            hybrid_encapsulate_v7(&mlkem_public, &x25519_public, unlocked.master_key.as_bytes())?
-        }
+        V7_VAULT_VERSION => hybrid_encapsulate_v7(
+            &mlkem_public,
+            &x25519_public,
+            unlocked.master_key.as_bytes(),
+        )?,
         _ => hybrid_encapsulate(&mlkem_public, &x25519_public)?,
     };
 
@@ -451,9 +451,11 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
 
     for (name, plaintext, created) in &secrets {
         let encap = match unlocked.vault.version {
-            V7_VAULT_VERSION => {
-                hybrid_encapsulate_v7(&mlkem_public, &x25519_public, unlocked.master_key.as_bytes())?
-            }
+            V7_VAULT_VERSION => hybrid_encapsulate_v7(
+                &mlkem_public,
+                &x25519_public,
+                unlocked.master_key.as_bytes(),
+            )?,
             _ => hybrid_encapsulate(&mlkem_public, &x25519_public)?,
         };
         let (ciphertext, nonce) = aes_encrypt(&encap.derived_key, plaintext.expose().as_bytes())?;
