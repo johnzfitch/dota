@@ -29,8 +29,8 @@ flowchart LR
     A[Passphrase] -->|Argon2id| B[Master Key mk]
     B --> C["ML-KEM-768\nencapsulate → ss_kem, ct_kem"]
     B --> D["X25519 ephemeral DH\n→ ss_dh, eph_pk"]
-    B -->|"τ = HMAC&#40;mk, ct_kem ‖ eph_pk&#41;"| E
-    C --> E["TC-HKEM combiner\nHKDF&#40;ss_kem‖ss_dh‖ct_kem‖eph_pk‖τ&#41;"]
+    B -->|"τ = HMAC(mk, ct_kem ‖ eph_pk)"| E
+    C --> E["TC-HKEM combiner\nHKDF(ss_kem‖ss_dh‖ct_kem‖eph_pk‖τ)"]
     D --> E
     E --> F["AES-256-GCM"]
     F --> G[Encrypted Secret]
