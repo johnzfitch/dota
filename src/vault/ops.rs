@@ -25,7 +25,7 @@ use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 const KDF_ALGORITHM: &str = "argon2id";
 const SECRET_ALGORITHM: &str = "hybrid-mlkem768-x25519";
@@ -133,10 +133,10 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     };
     vault.key_commitment = Some(compute_key_commitment(&master_key, &vault)?);
 
-    // Create parent directory if needed
-    if let Some(parent) = Path::new(vault_path).parent() {
-        fs::create_dir_all(parent).context("Failed to create vault directory")?;
-    }
+    // `save_vault_file` will create and harden the parent directory as
+    // part of the atomic-write path; no need to pre-create it here. Doing
+    // a separate `fs::create_dir_all` first would briefly expose the
+    // directory at the umask-default mode before it is chmod'd to 0700.
 
     // Write vault to file with atomic replace and restrictive permissions.
     save_vault_file(vault_path, &vault)?;
@@ -263,28 +263,46 @@ fn decrypt_vault_private_keys(
     vault: &Vault,
     master_key: &MasterKey,
 ) -> Result<(MlKemPrivateKey, X25519PrivateKey)> {
-    let wrapping = derive_wrapping_keys_for_vault_version(vault.version, master_key)?;
-    let mlkem_sk_bytes = Zeroizing::new(
-        aes_decrypt(
-            &wrapping.mlkem,
-            &vault.kem.encrypted_private_key,
-            vault.kem.private_key_nonce.as_slice().try_into()?,
-        )
-        .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?,
-    );
-    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
+    // Key commitment is verified before this function runs, so by the time we
+    // reach AES-GCM decryption the passphrase is already known correct. Any
+    // failure here is vault corruption or tampering of the wrapped private
+    // keys themselves. Surface a single uniform error string for both arms so
+    // that an attacker observing error output cannot tell which wrapped key
+    // failed first or distinguish wrong-passphrase from corruption.
+    const VAULT_DECRYPT_ERROR: &str =
+        "Vault decryption failed — vault file may be corrupted or tampered with";
 
+    let wrapping = derive_wrapping_keys_for_vault_version(vault.version, master_key)?;
+    let mlkem_nonce: [u8; AES_GCM_NONCE_LEN] = vault
+        .kem
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+    let mlkem_sk_bytes = Zeroizing::new(
+        aes_decrypt(&wrapping.mlkem, &vault.kem.encrypted_private_key, &mlkem_nonce)
+            .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
+    );
+    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+
+    let x25519_nonce: [u8; AES_GCM_NONCE_LEN] = vault
+        .x25519
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
     let x25519_sk_bytes = Zeroizing::new(
         aes_decrypt(
             &wrapping.x25519,
             &vault.x25519.encrypted_private_key,
-            vault.x25519.private_key_nonce.as_slice().try_into()?,
+            &x25519_nonce,
         )
-        .context("Failed to decrypt X25519 private key (wrong passphrase?)")?,
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
     );
     let x25519_private = X25519PrivateKey::from_bytes(
         <&[u8] as TryInto<[u8; 32]>>::try_into(x25519_sk_bytes.as_ref())
-            .context("Invalid X25519 key length")?,
+            .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
     );
 
     Ok((mlkem_private, x25519_private))
@@ -531,8 +549,19 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
     let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
 
-    // Convert to String, consuming the SecretVec (inner bytes zeroized on drop)
-    let s = String::from_utf8(plaintext.into_inner()).context("Secret contains invalid UTF-8")?;
+    // Convert to String. On UTF-8 failure, `String::from_utf8` returns a
+    // `FromUtf8Error` that owns the original bytes — if we propagated that
+    // error directly, the plaintext would survive (un-zeroized) inside the
+    // anyhow chain. Catch the error, zeroize the recovered bytes, and surface
+    // a content-free message instead.
+    let s = match String::from_utf8(plaintext.into_inner()) {
+        Ok(s) => s,
+        Err(err) => {
+            let mut leaked = err.into_bytes();
+            leaked.zeroize();
+            anyhow::bail!("Secret contains invalid UTF-8");
+        }
+    };
     Ok(SecretString::new(s))
 }
 
@@ -572,7 +601,7 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
     let parent_existed = parent.exists();
     if !parent_existed {
-        fs::create_dir_all(parent).context("Failed to create vault directory")?;
+        create_vault_directory(parent)?;
     }
 
     #[cfg(unix)]
@@ -607,6 +636,27 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
         let _ = dir.sync_all();
     }
 
+    Ok(())
+}
+
+/// Create the vault parent directory with 0700 from inception on Unix to
+/// avoid a TOCTOU window in which a freshly-created directory exists at
+/// the umask default before it is chmod'd. On non-Unix platforms this is
+/// equivalent to `fs::create_dir_all`.
+fn create_vault_directory(parent: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
+            .create(parent)
+            .context("Failed to create vault directory")?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(parent).context("Failed to create vault directory")?;
+    }
     Ok(())
 }
 

@@ -74,7 +74,18 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
 
     // Get value from args, stdin (if piped), or interactive prompt
     let secret_value = match value {
-        Some(v) => SecretString::new(v),
+        Some(v) => {
+            // Values passed on argv land in shell history, ps(1) output, and
+            // /proc/<pid>/cmdline. Warn so the user can drop the argument and
+            // use the prompt or stdin path instead. We cannot scrub the value
+            // out of argv after the fact.
+            eprintln!(
+                "warning: secret value supplied on the command line is visible \
+                 in shell history and to other processes via /proc/<pid>/cmdline; \
+                 prefer the interactive prompt or piping the value on stdin"
+            );
+            SecretString::new(v)
+        }
         None => {
             use std::io::{IsTerminal, Read};
             if std::io::stdin().is_terminal() {
