@@ -304,8 +304,12 @@ fn decrypt_vault_private_keys(
         .try_into()
         .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
     let mlkem_sk_bytes = Zeroizing::new(
-        aes_decrypt(&wrapping.mlkem, &vault.kem.encrypted_private_key, &mlkem_nonce)
-            .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
+        aes_decrypt(
+            &wrapping.mlkem,
+            &vault.kem.encrypted_private_key,
+            &mlkem_nonce,
+        )
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
     );
     let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())
         .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;

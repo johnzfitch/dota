@@ -55,7 +55,9 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("  help                          Show this help");
                 println!("  list                          List secret names");
                 println!("  get <name>                    Show secret value");
-                println!("  set <name>                    Set/update secret (value prompted, never echoed)");
+                println!(
+                    "  set <name>                    Set/update secret (value prompted, never echoed)"
+                );
                 println!("  rm <name>                     Remove secret");
                 println!("  info                          Vault metadata");
                 println!("  refresh                       Reload vault from disk");
@@ -99,11 +101,10 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                              non-echoing prompt"
                         );
                     } else {
-                        let value =
-                            SecretString::new(prompt_password(format!(
-                                "Enter value for '{}': ",
-                                name
-                            ))?);
+                        let value = SecretString::new(prompt_password(format!(
+                            "Enter value for '{}': ",
+                            name
+                        ))?);
                         match set_secret(&mut unlocked, name, value.expose()) {
                             Ok(_) => println!("Secret '{}' saved", name),
                             Err(e) => println!("error: {}", e),

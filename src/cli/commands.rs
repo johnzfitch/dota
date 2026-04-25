@@ -144,10 +144,7 @@ pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
         anyhow::bail!("secret name must not be empty");
     }
     if name.len() > MAX_SECRET_NAME_BYTES {
-        anyhow::bail!(
-            "secret name exceeds {} bytes",
-            MAX_SECRET_NAME_BYTES
-        );
+        anyhow::bail!("secret name exceeds {} bytes", MAX_SECRET_NAME_BYTES);
     }
     if name.trim() != name {
         anyhow::bail!("secret name must not have leading or trailing whitespace");
