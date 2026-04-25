@@ -144,6 +144,30 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maximum vault file size accepted on disk.
+///
+/// A real-world vault — KEM public key + wrapped private keys + a few
+/// thousand secrets — fits well under a megabyte. The cap exists to defeat
+/// resource-exhaustion attacks where a hostile vault file (e.g. a symlink
+/// target swapped after the symlink check, or a vault planted in a shared
+/// directory) tries to make `fs::read_to_string` and `serde_json` allocate
+/// unbounded memory before any cryptographic check has run.
+pub(crate) const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a vault file from disk, refusing oversized files before we ever
+/// hand the bytes to `serde_json`.
+pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
+    let metadata = fs::metadata(vault_path).context("Failed to read vault file")?;
+    if metadata.len() > MAX_VAULT_FILE_BYTES {
+        anyhow::bail!(
+            "Vault file size {} bytes exceeds {}-byte sanity cap; refusing to load",
+            metadata.len(),
+            MAX_VAULT_FILE_BYTES
+        );
+    }
+    fs::read_to_string(vault_path).context("Failed to read vault file")
+}
+
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
     let vault_path_ref = Path::new(vault_path);
@@ -154,7 +178,7 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
     }
 
     // Read and parse vault file, migrating if needed
-    let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
+    let json = read_vault_file(vault_path)?;
 
     let probe: super::legacy::VaultVersionProbe =
         serde_json::from_str(&json).context("Failed to parse vault version")?;
@@ -917,7 +941,7 @@ pub(crate) fn compute_key_commitment(master_key: &MasterKey, vault: &Vault) -> R
 /// - Version 5: already current, no-op.
 #[allow(dead_code)]
 pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
-    let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
+    let json = read_vault_file(vault_path)?;
     let mut vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
 
     if vault.version < MIN_VAULT_VERSION {
@@ -1694,5 +1718,24 @@ mod tests {
             let mode = fs::metadata(vault_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn test_unlock_rejects_oversized_vault_file() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Plant a JSON-shaped file that comfortably exceeds the cap. We do
+        // not need it to be a valid vault — the size check runs before any
+        // parsing.
+        let oversized = vec![b'A'; (MAX_VAULT_FILE_BYTES + 1) as usize];
+        fs::write(vault_path, oversized).unwrap();
+
+        let err = unlock_vault("test-passphrase", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

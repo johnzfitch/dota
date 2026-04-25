@@ -69,43 +69,16 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
 }
 
 /// Handle 'set' command
-pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String>) -> Result<()> {
+pub fn handle_set(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Get value from args, stdin (if piped), or interactive prompt
-    let secret_value = match value {
-        Some(v) => {
-            // Values passed on argv land in shell history, ps(1) output, and
-            // /proc/<pid>/cmdline. Warn so the user can drop the argument and
-            // use the prompt or stdin path instead. We cannot scrub the value
-            // out of argv after the fact.
-            eprintln!(
-                "warning: secret value supplied on the command line is visible \
-                 in shell history and to other processes via /proc/<pid>/cmdline; \
-                 prefer the interactive prompt or piping the value on stdin"
-            );
-            SecretString::new(v)
-        }
-        None => {
-            use std::io::{IsTerminal, Read};
-            if std::io::stdin().is_terminal() {
-                SecretString::new(prompt_password(format!("Enter value for '{}': ", name))?)
-            } else {
-                let mut buf = String::new();
-                std::io::stdin()
-                    .take(1024 * 1024)
-                    .read_to_string(&mut buf)?;
-                let trimmed = buf.trim_end().to_string();
-                buf.zeroize();
-                if trimmed.is_empty() {
-                    anyhow::bail!(
-                        "empty value from stdin; pass a value as an argument or use an interactive terminal"
-                    );
-                }
-                SecretString::new(trimmed)
-            }
-        }
-    };
+    validate_secret_name(&name)?;
+
+    // The value is read from stdin if piped, otherwise from an interactive
+    // prompt. We never accept the value on argv: argv is observable to other
+    // processes via /proc/<pid>/cmdline, ps(1), audit logs, and is recorded
+    // in shell history.
+    let secret_value = read_secret_value(&name)?;
 
     // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
     let passphrase = read_passphrase("Vault passphrase: ")?;
@@ -119,9 +92,100 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
     Ok(())
 }
 
+/// Read a secret value from stdin (when piped) or an interactive password
+/// prompt (when stdin is a TTY). Stdin reads are capped to defend against
+/// a malicious pipe trying to exhaust process memory.
+fn read_secret_value(name: &str) -> Result<SecretString> {
+    use std::io::{IsTerminal, Read};
+
+    /// Maximum accepted size for a single secret read from stdin.
+    /// Comfortably fits real-world tokens, certificates, and SSH keys
+    /// while bounding peak memory.
+    const MAX_STDIN_SECRET_BYTES: u64 = 1024 * 1024;
+
+    if std::io::stdin().is_terminal() {
+        return Ok(SecretString::new(prompt_password(format!(
+            "Enter value for '{}': ",
+            name
+        ))?));
+    }
+
+    let mut buf = String::new();
+    let n = std::io::stdin()
+        .take(MAX_STDIN_SECRET_BYTES + 1)
+        .read_to_string(&mut buf)?;
+    if n as u64 > MAX_STDIN_SECRET_BYTES {
+        buf.zeroize();
+        anyhow::bail!(
+            "secret value exceeds {} bytes; refusing to read further",
+            MAX_STDIN_SECRET_BYTES
+        );
+    }
+    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+    buf.zeroize();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "empty value from stdin; provide the value via the interactive prompt or pipe non-empty input"
+        );
+    }
+    Ok(SecretString::new(trimmed))
+}
+
+/// Validate a secret name supplied on the user-input boundary.
+///
+/// Rejects names that could be used to spoof other entries in `list`/TUI
+/// output, that would break shell-export safety, or that would let
+/// printable-looking strings carry hidden control / bidi-override characters
+/// (a class of "unicode confusable" attack against the operator).
+pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
+    const MAX_SECRET_NAME_BYTES: usize = 256;
+
+    if name.is_empty() {
+        anyhow::bail!("secret name must not be empty");
+    }
+    if name.len() > MAX_SECRET_NAME_BYTES {
+        anyhow::bail!(
+            "secret name exceeds {} bytes",
+            MAX_SECRET_NAME_BYTES
+        );
+    }
+    if name.trim() != name {
+        anyhow::bail!("secret name must not have leading or trailing whitespace");
+    }
+    for ch in name.chars() {
+        // ASCII control chars (incl. NUL, LF, CR, ESC, DEL) are never legitimate
+        // in a secret identifier and let attacker-controlled names corrupt
+        // terminal output or `list` rendering.
+        if ch.is_control() {
+            anyhow::bail!(
+                "secret name contains a control character (U+{:04X})",
+                ch as u32
+            );
+        }
+        // Bidi controls and zero-width / formatting characters allow visually
+        // identical names to differ in bytes, enabling spoofing of an existing
+        // entry in TUI/list output.
+        match ch as u32 {
+            0x200B..=0x200F   // zero-width + LRM/RLM
+            | 0x202A..=0x202E // LRE/RLE/PDF/LRO/RLO
+            | 0x2066..=0x2069 // LRI/RLI/FSI/PDI
+            | 0xFEFF          // BOM / ZWNBSP
+            | 0x2028 | 0x2029 // LINE / PARAGRAPH SEPARATOR
+            => anyhow::bail!(
+                "secret name contains a disallowed format character (U+{:04X})",
+                ch as u32
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Handle 'get' command
 pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
+
+    validate_secret_name(&name)?;
 
     // Unlock vault (accepts DOTA_PASSPHRASE env var for non-interactive/daemon use)
     let passphrase = read_passphrase("Vault passphrase: ")?;
@@ -165,6 +229,8 @@ pub fn handle_list(vault_path: Option<String>) -> Result<()> {
 /// Handle 'rm' command
 pub fn handle_rm(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
+
+    validate_secret_name(&name)?;
 
     // Unlock vault
     let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
@@ -293,8 +359,10 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
         anyhow::bail!("No vault found at: {}", vault_path);
     }
 
-    // Read vault to check version before prompting for passphrase
-    let json = std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
+    // Read vault to check version before prompting for passphrase. Honour
+    // the same size cap the unlock path enforces — refuse to feed a
+    // multi-gigabyte planted vault into serde_json before any crypto runs.
+    let json = crate::vault::ops::read_vault_file(&vault_path)?;
     let probe: serde_json::Value =
         serde_json::from_str(&json).context("Failed to parse vault file")?;
     let version = probe["version"].as_u64().context("Missing version field")?;
@@ -319,3 +387,57 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
 }
 
 use anyhow::Context;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_secret_name_accepts_typical_identifiers() {
+        validate_secret_name("API_KEY").unwrap();
+        validate_secret_name("aws/prod/access-token").unwrap();
+        validate_secret_name("user@example.com").unwrap();
+        validate_secret_name("π-token").unwrap();
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_empty() {
+        assert!(validate_secret_name("").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_whitespace_padding() {
+        assert!(validate_secret_name(" API_KEY").is_err());
+        assert!(validate_secret_name("API_KEY ").is_err());
+        assert!(validate_secret_name("\tAPI_KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_control_characters() {
+        assert!(validate_secret_name("API\nKEY").is_err());
+        assert!(validate_secret_name("API\rKEY").is_err());
+        assert!(validate_secret_name("API\x00KEY").is_err());
+        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC — terminal escape
+        assert!(validate_secret_name("API\x7fKEY").is_err()); // DEL
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_bidi_and_format_overrides() {
+        // Right-to-Left Override — classic confusable-name attack.
+        assert!(validate_secret_name("API\u{202E}KEY").is_err());
+        // Left-to-Right Override.
+        assert!(validate_secret_name("API\u{202D}KEY").is_err());
+        // Zero-Width Space — invisible in `list` output.
+        assert!(validate_secret_name("API\u{200B}KEY").is_err());
+        // Byte Order Mark / ZWNBSP.
+        assert!(validate_secret_name("\u{FEFF}API_KEY").is_err());
+        // Unicode line separator.
+        assert!(validate_secret_name("API\u{2028}KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_oversized() {
+        let huge = "A".repeat(257);
+        assert!(validate_secret_name(&huge).is_err());
+    }
+}

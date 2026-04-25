@@ -31,13 +31,13 @@ pub enum Commands {
     /// Unlock vault and enter TUI (default)
     Unlock,
 
-    /// Set a secret (add or update)
+    /// Set a secret (add or update). The value is read from stdin when
+    /// piped, otherwise from an interactive prompt. The value is never
+    /// accepted on the command line — argv is visible to other local
+    /// processes via /proc and is recorded in shell history.
     Set {
         /// Secret name
         name: String,
-        /// Secret value (if omitted, reads from stdin or prompts)
-        #[arg(allow_hyphen_values = true)]
-        value: Option<String>,
     },
 
     /// Get a secret value

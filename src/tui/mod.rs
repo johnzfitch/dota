@@ -4,6 +4,7 @@
 
 pub mod app;
 
+use crate::cli::commands::validate_secret_name;
 use crate::security::{SecretString, shutdown_requested};
 use crate::vault::ops::{get_secret, list_secrets, remove_secret, set_secret, unlock_vault};
 use anyhow::Result;
@@ -54,7 +55,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("  help                          Show this help");
                 println!("  list                          List secret names");
                 println!("  get <name>                    Show secret value");
-                println!("  set <name> <value...>         Set/update secret");
+                println!("  set <name>                    Set/update secret (value prompted, never echoed)");
                 println!("  rm <name>                     Remove secret");
                 println!("  info                          Vault metadata");
                 println!("  refresh                       Reload vault from disk");
@@ -71,50 +72,56 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                     );
                 }
             }
-            "get" => {
-                let name = parts.pop_front();
-                if let Some(name) = name {
-                    match get_secret(&unlocked, name) {
+            "get" => match parts.pop_front() {
+                Some(name) => match validate_secret_name(name) {
+                    Ok(()) => match get_secret(&unlocked, name) {
                         Ok(value) => println!("{}", value.expose()),
                         Err(e) => println!("error: {}", e),
-                    }
-                } else {
-                    println!("error: usage: get <name>");
-                }
-            }
-            "set" => {
-                let name = parts.pop_front();
-                if let Some(name) = name {
-                    let value = SecretString::new(if let Some(v) = parts.pop_front() {
-                        let mut merged = v.to_string();
-                        while let Some(part) = parts.pop_front() {
-                            merged.push(' ');
-                            merged.push_str(part);
-                        }
-                        merged
+                    },
+                    Err(e) => println!("error: {}", e),
+                },
+                None => println!("error: usage: get <name>"),
+            },
+            "set" => match parts.pop_front() {
+                Some(name) => {
+                    if let Err(e) = validate_secret_name(name) {
+                        println!("error: {}", e);
+                    } else if !parts.is_empty() {
+                        // Refuse to accept the value from the inline command
+                        // line. Anything typed here would land in the shell
+                        // history of any line-buffered terminal we're attached
+                        // to and would also live in the in-memory `buffer`
+                        // until the next read overwrites it. Forcing the
+                        // password prompt keeps the value out of both.
+                        println!(
+                            "error: 'set' does not accept the value inline; \
+                             call 'set <name>' and enter the value at the \
+                             non-echoing prompt"
+                        );
                     } else {
-                        prompt_password(format!("Enter value for '{}': ", name))?
-                    });
-
-                    match set_secret(&mut unlocked, name, value.expose()) {
-                        Ok(_) => println!("Secret '{}' saved", name),
-                        Err(e) => println!("error: {}", e),
+                        let value =
+                            SecretString::new(prompt_password(format!(
+                                "Enter value for '{}': ",
+                                name
+                            ))?);
+                        match set_secret(&mut unlocked, name, value.expose()) {
+                            Ok(_) => println!("Secret '{}' saved", name),
+                            Err(e) => println!("error: {}", e),
+                        }
                     }
-                } else {
-                    println!("error: usage: set <name> [value]");
                 }
-            }
-            "rm" => {
-                let name = parts.pop_front();
-                if let Some(name) = name {
-                    match remove_secret(&mut unlocked, name) {
+                None => println!("error: usage: set <name>"),
+            },
+            "rm" => match parts.pop_front() {
+                Some(name) => match validate_secret_name(name) {
+                    Ok(()) => match remove_secret(&mut unlocked, name) {
                         Ok(_) => println!("Secret '{}' removed", name),
                         Err(e) => println!("error: {}", e),
-                    }
-                } else {
-                    println!("error: usage: rm <name>");
-                }
-            }
+                    },
+                    Err(e) => println!("error: {}", e),
+                },
+                None => println!("error: usage: rm <name>"),
+            },
             "info" => {
                 println!("Vault Information");
                 println!("─────────────────");
