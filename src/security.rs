@@ -185,9 +185,9 @@ pub fn shutdown_requested() -> bool {
 
 /// Constant-time byte-slice equality comparison.
 ///
-/// Visits every byte in both slices without short-circuiting and uses
-/// `core::hint::black_box` on each iteration to prevent the optimizer
-/// from rewriting the loop into an early-exit byte compare. Returns
+/// Visits every byte in both slices without short-circuiting and runs
+/// `std::hint::black_box` on the running accumulator so the optimizer
+/// cannot rewrite the loop into an early-exit byte compare. Returns
 /// `false` if the lengths differ; the length check itself is not secret
 /// because length information is observable elsewhere (memory allocations,
 /// I/O, etc.).

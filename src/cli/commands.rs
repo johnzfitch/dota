@@ -3,7 +3,7 @@
 use crate::security::SecretString;
 use crate::vault::ops::{
     change_passphrase, create_vault, default_vault_path, get_secret, list_secrets, remove_secret,
-    rotate_keys, set_secret, unlock_vault,
+    rotate_keys, set_secret, unlock_vault, validate_secret_name,
 };
 use anyhow::Result;
 use rpassword::prompt_password;
@@ -62,7 +62,9 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Vault created successfully!");
     println!("Location: {}", vault_path);
     println!();
-    println!("Use 'dota set <name> <value>' to add secrets");
+    println!(
+        "Use 'dota set <name>' to add secrets (the value is read from a non-echoing prompt or stdin)"
+    );
     println!("Use 'dota unlock' to enter interactive TUI mode");
 
     Ok(())
@@ -129,53 +131,6 @@ fn read_secret_value(name: &str) -> Result<SecretString> {
         );
     }
     Ok(SecretString::new(trimmed))
-}
-
-/// Validate a secret name supplied on the user-input boundary.
-///
-/// Rejects names that could be used to spoof other entries in `list`/TUI
-/// output, that would break shell-export safety, or that would let
-/// printable-looking strings carry hidden control / bidi-override characters
-/// (a class of "unicode confusable" attack against the operator).
-pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
-    const MAX_SECRET_NAME_BYTES: usize = 256;
-
-    if name.is_empty() {
-        anyhow::bail!("secret name must not be empty");
-    }
-    if name.len() > MAX_SECRET_NAME_BYTES {
-        anyhow::bail!("secret name exceeds {} bytes", MAX_SECRET_NAME_BYTES);
-    }
-    if name.trim() != name {
-        anyhow::bail!("secret name must not have leading or trailing whitespace");
-    }
-    for ch in name.chars() {
-        // ASCII control chars (incl. NUL, LF, CR, ESC, DEL) are never legitimate
-        // in a secret identifier and let attacker-controlled names corrupt
-        // terminal output or `list` rendering.
-        if ch.is_control() {
-            anyhow::bail!(
-                "secret name contains a control character (U+{:04X})",
-                ch as u32
-            );
-        }
-        // Bidi controls and zero-width / formatting characters allow visually
-        // identical names to differ in bytes, enabling spoofing of an existing
-        // entry in TUI/list output.
-        match ch as u32 {
-            0x200B..=0x200F   // zero-width + LRM/RLM
-            | 0x202A..=0x202E // LRE/RLE/PDF/LRO/RLO
-            | 0x2066..=0x2069 // LRI/RLI/FSI/PDI
-            | 0xFEFF          // BOM / ZWNBSP
-            | 0x2028 | 0x2029 // LINE / PARAGRAPH SEPARATOR
-            => anyhow::bail!(
-                "secret name contains a disallowed format character (U+{:04X})",
-                ch as u32
-            ),
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// Handle 'get' command
@@ -384,57 +339,3 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
 }
 
 use anyhow::Context;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_secret_name_accepts_typical_identifiers() {
-        validate_secret_name("API_KEY").unwrap();
-        validate_secret_name("aws/prod/access-token").unwrap();
-        validate_secret_name("user@example.com").unwrap();
-        validate_secret_name("π-token").unwrap();
-    }
-
-    #[test]
-    fn validate_secret_name_rejects_empty() {
-        assert!(validate_secret_name("").is_err());
-    }
-
-    #[test]
-    fn validate_secret_name_rejects_whitespace_padding() {
-        assert!(validate_secret_name(" API_KEY").is_err());
-        assert!(validate_secret_name("API_KEY ").is_err());
-        assert!(validate_secret_name("\tAPI_KEY").is_err());
-    }
-
-    #[test]
-    fn validate_secret_name_rejects_control_characters() {
-        assert!(validate_secret_name("API\nKEY").is_err());
-        assert!(validate_secret_name("API\rKEY").is_err());
-        assert!(validate_secret_name("API\x00KEY").is_err());
-        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC — terminal escape
-        assert!(validate_secret_name("API\x7fKEY").is_err()); // DEL
-    }
-
-    #[test]
-    fn validate_secret_name_rejects_bidi_and_format_overrides() {
-        // Right-to-Left Override — classic confusable-name attack.
-        assert!(validate_secret_name("API\u{202E}KEY").is_err());
-        // Left-to-Right Override.
-        assert!(validate_secret_name("API\u{202D}KEY").is_err());
-        // Zero-Width Space — invisible in `list` output.
-        assert!(validate_secret_name("API\u{200B}KEY").is_err());
-        // Byte Order Mark / ZWNBSP.
-        assert!(validate_secret_name("\u{FEFF}API_KEY").is_err());
-        // Unicode line separator.
-        assert!(validate_secret_name("API\u{2028}KEY").is_err());
-    }
-
-    #[test]
-    fn validate_secret_name_rejects_oversized() {
-        let huge = "A".repeat(257);
-        assert!(validate_secret_name(&huge).is_err());
-    }
-}

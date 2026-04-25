@@ -148,36 +148,72 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 ///
 /// A real-world vault — KEM public key + wrapped private keys + a few
 /// thousand secrets — fits well under a megabyte. The cap exists to defeat
-/// resource-exhaustion attacks where a hostile vault file (e.g. a symlink
-/// target swapped after the symlink check, or a vault planted in a shared
-/// directory) tries to make `fs::read_to_string` and `serde_json` allocate
+/// resource-exhaustion attacks where a hostile vault file (e.g. a vault
+/// planted in a shared directory) tries to make `serde_json` allocate
 /// unbounded memory before any cryptographic check has run.
 pub(crate) const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Read a vault file from disk, refusing oversized files before we ever
-/// hand the bytes to `serde_json`.
+/// Read a vault file from disk with two defensive bounds in place:
+///
+/// 1. **Symlink refusal.** The path is rejected if it points at a symlink.
+///    All caller paths (`unlock_vault`, `migrate_vault`, `handle_upgrade`)
+///    inherit this check by going through this function instead of doing
+///    their own thing.
+///
+/// 2. **Hard size cap on the bytes actually read.** We open the file once,
+///    use the open handle's `metadata()` for the pre-check, then read
+///    through a `take(MAX_VAULT_FILE_BYTES + 1)` limiter and reject if the
+///    cap was reached. Pre-checking metadata alone is racy — the file can
+///    grow or be swapped between the metadata call and the read — so the
+///    bound is enforced on the bytes we actually pull into memory, not on
+///    a stat'd size.
 pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
-    let metadata = fs::metadata(vault_path).context("Failed to read vault file")?;
-    if metadata.len() > MAX_VAULT_FILE_BYTES {
+    use std::io::Read;
+
+    let path_ref = Path::new(vault_path);
+    if let Ok(meta) = fs::symlink_metadata(path_ref)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!("Refusing to read vault through symlink: {}", vault_path);
+    }
+
+    let mut file = fs::File::open(vault_path).context("Failed to read vault file")?;
+
+    // Best-effort early reject for obviously-oversized files. The
+    // authoritative cap is enforced on the bytes-read path below; this
+    // pre-check just lets us fail fast without buffering anything.
+    if let Ok(metadata) = file.metadata()
+        && metadata.len() > MAX_VAULT_FILE_BYTES
+    {
         anyhow::bail!(
             "Vault file size {} bytes exceeds {}-byte sanity cap; refusing to load",
             metadata.len(),
             MAX_VAULT_FILE_BYTES
         );
     }
-    fs::read_to_string(vault_path).context("Failed to read vault file")
+
+    let mut buf = String::new();
+    let read = (&mut file)
+        .take(MAX_VAULT_FILE_BYTES + 1)
+        .read_to_string(&mut buf)
+        .context("Failed to read vault file")?;
+    if read as u64 > MAX_VAULT_FILE_BYTES {
+        // Drop the partial read before erroring so we never expose the
+        // truncated head of an oversized file in any later error context.
+        buf.zeroize();
+        anyhow::bail!(
+            "Vault file exceeds {}-byte sanity cap; refusing to load",
+            MAX_VAULT_FILE_BYTES
+        );
+    }
+
+    Ok(buf)
 }
 
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
-    let vault_path_ref = Path::new(vault_path);
-    if let Ok(meta) = fs::symlink_metadata(vault_path_ref)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!("Refusing to read vault through symlink: {}", vault_path);
-    }
-
-    // Read and parse vault file, migrating if needed
+    // Read and parse vault file, migrating if needed. `read_vault_file`
+    // performs the symlink refusal and size-cap enforcement.
     let json = read_vault_file(vault_path)?;
 
     let probe: super::legacy::VaultVersionProbe =
@@ -975,6 +1011,53 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a secret name against the project-wide rules.
+///
+/// Used at every point a secret name enters the system — direct CLI/TUI
+/// input *and* names parsed out of a vault file on unlock — so that no
+/// downstream caller (including `list` rendering, shell-export naming,
+/// and informational output) ever sees a name carrying ASCII control
+/// characters, terminal escape sequences, bidi overrides, zero-width or
+/// BOM characters, or Unicode line/paragraph separators.
+///
+/// Without this check, a name like `API\u{202E}KEY` could spoof an
+/// existing entry in `list`/TUI output, and a name embedding ESC could
+/// rewrite the operator's terminal during a benign `list`.
+pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
+    const MAX_SECRET_NAME_BYTES: usize = 256;
+
+    if name.is_empty() {
+        anyhow::bail!("secret name must not be empty");
+    }
+    if name.len() > MAX_SECRET_NAME_BYTES {
+        anyhow::bail!("secret name exceeds {} bytes", MAX_SECRET_NAME_BYTES);
+    }
+    if name.trim() != name {
+        anyhow::bail!("secret name must not have leading or trailing whitespace");
+    }
+    for ch in name.chars() {
+        if ch.is_control() {
+            anyhow::bail!(
+                "secret name contains a control character (U+{:04X})",
+                ch as u32
+            );
+        }
+        match ch as u32 {
+            0x200B..=0x200F   // zero-width + LRM/RLM
+            | 0x202A..=0x202E // LRE/RLE/PDF/LRO/RLO
+            | 0x2066..=0x2069 // LRI/RLI/FSI/PDI
+            | 0xFEFF          // BOM / ZWNBSP
+            | 0x2028 | 0x2029 // LINE / PARAGRAPH SEPARATOR
+            => anyhow::bail!(
+                "secret name contains a disallowed format character (U+{:04X})",
+                ch as u32
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn validate_vault_kdf(vault: &Vault) -> Result<()> {
     if vault.kdf.algorithm != KDF_ALGORITHM {
         anyhow::bail!(
@@ -1101,6 +1184,15 @@ fn validate_v7_vault(vault: &Vault) -> Result<()> {
     }
 
     for (name, secret) in &vault.secrets {
+        validate_secret_name(name).with_context(|| {
+            // Names from a hostile or tampered vault file go through this
+            // path before they ever reach `list`/TUI rendering. Catching
+            // them here means an attacker cannot smuggle terminal escape
+            // sequences or bidi-override confusables into operator output
+            // by handing the user a poisoned vault.
+            format!("Invalid secret name in vault file: {:?}", name)
+        })?;
+
         if secret.algorithm != V7_SECRET_ALGORITHM {
             anyhow::bail!(
                 "Unsupported secret algorithm for '{}': {} (expected {})",
@@ -1741,5 +1833,81 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_unlock_rejects_vault_with_malicious_secret_name() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Build a normal v7 vault, then rewrite the secret map under a name
+        // carrying a bidi override. This is the "poisoned vault" case the
+        // reviewer flagged: a hostile vault file presenting confusable
+        // entries to operator output.
+        create_vault("test-pass", vault_path).unwrap();
+        let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
+        set_secret(&mut unlocked, "API_KEY", "sk-12345").unwrap();
+
+        let mut vault: Vault =
+            serde_json::from_str(&fs::read_to_string(vault_path).unwrap()).unwrap();
+        let secret = vault.secrets.remove("API_KEY").unwrap();
+        vault.secrets.insert("API\u{202E}KEY".to_string(), secret);
+        fs::write(vault_path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
+
+        let err = unlock_vault("test-pass", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid secret name"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_secret_name_accepts_typical_identifiers() {
+        validate_secret_name("API_KEY").unwrap();
+        validate_secret_name("aws/prod/access-token").unwrap();
+        validate_secret_name("user@example.com").unwrap();
+        validate_secret_name("π-token").unwrap();
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_empty() {
+        assert!(validate_secret_name("").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_whitespace_padding() {
+        assert!(validate_secret_name(" API_KEY").is_err());
+        assert!(validate_secret_name("API_KEY ").is_err());
+        assert!(validate_secret_name("\tAPI_KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_control_characters() {
+        assert!(validate_secret_name("API\nKEY").is_err());
+        assert!(validate_secret_name("API\rKEY").is_err());
+        assert!(validate_secret_name("API\x00KEY").is_err());
+        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC — terminal escape
+        assert!(validate_secret_name("API\x7fKEY").is_err()); // DEL
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_bidi_and_format_overrides() {
+        // Right-to-Left Override — classic confusable-name attack.
+        assert!(validate_secret_name("API\u{202E}KEY").is_err());
+        // Left-to-Right Override.
+        assert!(validate_secret_name("API\u{202D}KEY").is_err());
+        // Zero-Width Space — invisible in `list` output.
+        assert!(validate_secret_name("API\u{200B}KEY").is_err());
+        // Byte Order Mark / ZWNBSP.
+        assert!(validate_secret_name("\u{FEFF}API_KEY").is_err());
+        // Unicode line separator.
+        assert!(validate_secret_name("API\u{2028}KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_oversized() {
+        let huge = "A".repeat(257);
+        assert!(validate_secret_name(&huge).is_err());
     }
 }
