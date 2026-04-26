@@ -5,7 +5,7 @@ use crate::vault::ops::{
     change_passphrase, create_vault, default_vault_path, get_secret, list_secrets, remove_secret,
     rotate_keys, set_secret, unlock_vault, validate_secret_name,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rpassword::prompt_password;
 use zeroize::Zeroize;
 
@@ -76,10 +76,8 @@ pub fn handle_set(vault_path: Option<String>, name: String) -> Result<()> {
 
     validate_secret_name(&name)?;
 
-    // The value is read from stdin if piped, otherwise from an interactive
-    // prompt. We never accept the value on argv: argv is observable to other
-    // processes via /proc/<pid>/cmdline, ps(1), audit logs, and is recorded
-    // in shell history.
+    // Never accept the value on argv: it is observable via
+    // /proc/<pid>/cmdline, ps(1), audit logs, and shell history.
     let secret_value = read_secret_value(&name)?;
 
     // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
@@ -94,16 +92,12 @@ pub fn handle_set(vault_path: Option<String>, name: String) -> Result<()> {
     Ok(())
 }
 
-/// Read a secret value from stdin (when piped) or an interactive password
-/// prompt (when stdin is a TTY). Stdin reads are capped to defend against
-/// a malicious pipe trying to exhaust process memory.
+/// Read a secret value from stdin (when piped) or a non-echoing prompt.
+/// The stdin path is hard-capped to bound memory under a hostile pipe.
 fn read_secret_value(name: &str) -> Result<SecretString> {
     use std::io::{IsTerminal, Read};
 
-    /// Maximum accepted size for a single secret read from stdin.
-    /// Comfortably fits real-world tokens, certificates, and SSH keys
-    /// while bounding peak memory.
-    const MAX_STDIN_SECRET_BYTES: u64 = 1024 * 1024;
+    const MAX_STDIN_SECRET_BYTES: usize = 1024 * 1024;
 
     if std::io::stdin().is_terminal() {
         return Ok(SecretString::new(prompt_password(format!(
@@ -114,23 +108,25 @@ fn read_secret_value(name: &str) -> Result<SecretString> {
 
     let mut buf = String::new();
     let n = std::io::stdin()
-        .take(MAX_STDIN_SECRET_BYTES + 1)
+        .take(MAX_STDIN_SECRET_BYTES as u64 + 1)
         .read_to_string(&mut buf)?;
-    if n as u64 > MAX_STDIN_SECRET_BYTES {
+    if n > MAX_STDIN_SECRET_BYTES {
         buf.zeroize();
         anyhow::bail!(
             "secret value exceeds {} bytes; refusing to read further",
             MAX_STDIN_SECRET_BYTES
         );
     }
-    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
-    buf.zeroize();
-    if trimmed.is_empty() {
+    // Trim trailing CR/LF in place so we don't allocate a second copy of
+    // the secret bytes on the heap.
+    let trimmed_len = buf.trim_end_matches(['\r', '\n']).len();
+    buf.truncate(trimmed_len);
+    if buf.is_empty() {
         anyhow::bail!(
             "empty value from stdin; provide the value via the interactive prompt or pipe non-empty input"
         );
     }
-    Ok(SecretString::new(trimmed))
+    Ok(SecretString::new(buf))
 }
 
 /// Handle 'get' command
@@ -337,5 +333,3 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     println!("Vault upgraded successfully to v{}.", VAULT_VERSION);
     Ok(())
 }
-
-use anyhow::Context;

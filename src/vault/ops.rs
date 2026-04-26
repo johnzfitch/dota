@@ -153,35 +153,53 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 /// unbounded memory before any cryptographic check has run.
 pub(crate) const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Refuse to operate on a path that resolves to a symlink. Centralized so
+/// every read/write path enforces the same policy and error wording.
+pub(crate) fn reject_symlink_path(path: &Path, action: &str) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "Refusing to {} vault through symlink: {}",
+            action,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Tighten an existing on-disk file to mode 0o600 (owner-only rw). No-op
+/// on non-Unix.
+#[cfg(unix)]
+pub(crate) fn restrict_file_to_owner_rw(path: &Path) -> Result<()> {
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("Failed to inspect permissions for {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("Failed to secure file permissions for {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restrict_file_to_owner_rw(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Read a vault file from disk with two defensive bounds in place:
 ///
-/// 1. **Symlink refusal.** The path is rejected if it points at a symlink.
-///    All caller paths (`unlock_vault`, `migrate_vault`, `handle_upgrade`)
-///    inherit this check by going through this function instead of doing
-///    their own thing.
-///
-/// 2. **Hard size cap on the bytes actually read.** We open the file once,
-///    use the open handle's `metadata()` for the pre-check, then read
-///    through a `take(MAX_VAULT_FILE_BYTES + 1)` limiter and reject if the
-///    cap was reached. Pre-checking metadata alone is racy — the file can
-///    grow or be swapped between the metadata call and the read — so the
-///    bound is enforced on the bytes we actually pull into memory, not on
-///    a stat'd size.
+/// 1. **Symlink refusal** — the path is rejected if it points at a symlink.
+/// 2. **Hard size cap on the bytes actually read** — pre-checking metadata
+///    alone is racy (the file can grow or be swapped between the metadata
+///    call and the read), so the bound is enforced on the bytes we actually
+///    pull into memory via `take(MAX_VAULT_FILE_BYTES + 1)`.
 pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
     use std::io::Read;
 
     let path_ref = Path::new(vault_path);
-    if let Ok(meta) = fs::symlink_metadata(path_ref)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!("Refusing to read vault through symlink: {}", vault_path);
-    }
+    reject_symlink_path(path_ref, "read")?;
 
     let mut file = fs::File::open(vault_path).context("Failed to read vault file")?;
 
-    // Best-effort early reject for obviously-oversized files. The
-    // authoritative cap is enforced on the bytes-read path below; this
-    // pre-check just lets us fail fast without buffering anything.
     if let Ok(metadata) = file.metadata()
         && metadata.len() > MAX_VAULT_FILE_BYTES
     {
@@ -198,8 +216,7 @@ pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
         .read_to_string(&mut buf)
         .context("Failed to read vault file")?;
     if read as u64 > MAX_VAULT_FILE_BYTES {
-        // Drop the partial read before erroring so we never expose the
-        // truncated head of an oversized file in any later error context.
+        // Drop the partial read so it never appears in any later error context.
         buf.zeroize();
         anyhow::bail!(
             "Vault file exceeds {}-byte sanity cap; refusing to load",
@@ -212,8 +229,6 @@ pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
 
 /// Unlock a vault with a passphrase
 pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
-    // Read and parse vault file, migrating if needed. `read_vault_file`
-    // performs the symlink refusal and size-cap enforcement.
     let json = read_vault_file(vault_path)?;
 
     let probe: super::legacy::VaultVersionProbe =
@@ -323,12 +338,10 @@ fn decrypt_vault_private_keys(
     vault: &Vault,
     master_key: &MasterKey,
 ) -> Result<(MlKemPrivateKey, X25519PrivateKey)> {
-    // Key commitment is verified before this function runs, so by the time we
-    // reach AES-GCM decryption the passphrase is already known correct. Any
-    // failure here is vault corruption or tampering of the wrapped private
-    // keys themselves. Surface a single uniform error string for both arms so
-    // that an attacker observing error output cannot tell which wrapped key
-    // failed first or distinguish wrong-passphrase from corruption.
+    // Key commitment runs before this function, so a failure here means
+    // vault corruption rather than wrong passphrase. Surface one uniform
+    // error so an observer cannot tell which arm failed first or distinguish
+    // wrong-passphrase from corruption.
     const VAULT_DECRYPT_ERROR: &str =
         "Vault decryption failed — vault file may be corrupted or tampered with";
 
@@ -656,11 +669,7 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
 pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
-    if let Ok(meta) = fs::symlink_metadata(vault_path)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!("Refusing to write vault through symlink: {}", path);
-    }
+    reject_symlink_path(vault_path, "write")?;
 
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
     let parent_existed = parent.exists();
@@ -687,14 +696,7 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     tmp.persist(vault_path)
         .context("Failed to persist vault file")?;
 
-    #[cfg(unix)]
-    {
-        let mut perms = fs::metadata(vault_path)
-            .context("Failed to inspect vault file permissions")?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(vault_path, perms).context("Failed to secure vault file")?;
-    }
+    restrict_file_to_owner_rw(vault_path)?;
 
     if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
@@ -1042,17 +1044,21 @@ pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
                 ch as u32
             );
         }
-        match ch as u32 {
-            0x200B..=0x200F   // zero-width + LRM/RLM
-            | 0x202A..=0x202E // LRE/RLE/PDF/LRO/RLO
-            | 0x2066..=0x2069 // LRI/RLI/FSI/PDI
-            | 0xFEFF          // BOM / ZWNBSP
-            | 0x2028 | 0x2029 // LINE / PARAGRAPH SEPARATOR
-            => anyhow::bail!(
+        // Bidi controls, zero-width, BOM, and Unicode line/paragraph
+        // separators allow visually identical names to differ in bytes.
+        if matches!(
+            ch as u32,
+            0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2066..=0x2069
+                | 0xFEFF
+                | 0x2028
+                | 0x2029
+        ) {
+            anyhow::bail!(
                 "secret name contains a disallowed format character (U+{:04X})",
                 ch as u32
-            ),
-            _ => {}
+            );
         }
     }
     Ok(())

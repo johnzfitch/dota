@@ -75,27 +75,23 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                     );
                 }
             }
-            "get" => match parts.pop_front() {
-                Some(name) => match validate_secret_name(name) {
-                    Ok(()) => match get_secret(&unlocked, name) {
-                        Ok(value) => println!("{}", value.expose()),
-                        Err(e) => println!("error: {}", e),
-                    },
-                    Err(e) => println!("error: {}", e),
-                },
-                None => println!("error: usage: get <name>"),
+            "get" => match named_op(&mut parts, "get", |name| {
+                get_secret(&unlocked, name).map(|value| println!("{}", value.expose()))
+            }) {
+                Ok(()) => {}
+                Err(e) => println!("error: {}", e),
             },
             "set" => match parts.pop_front() {
+                None => println!("error: usage: set <name>"),
                 Some(name) => {
                     if let Err(e) = validate_secret_name(name) {
                         println!("error: {}", e);
                     } else if !parts.is_empty() {
-                        // Refuse to accept the value from the inline command
-                        // line. Anything typed here is echoed to the terminal
-                        // and retained in terminal scrollback, and would also
-                        // live in the in-memory `buffer` until the next read
-                        // overwrites it. Forcing the non-echoing password
-                        // prompt keeps the value out of both.
+                        // Inline values would be echoed to the terminal and
+                        // retained in scrollback, and would also live in the
+                        // in-memory `buffer` until the next read overwrites
+                        // it. The non-echoing prompt keeps the value out of
+                        // both.
                         println!(
                             "error: 'set' does not accept the value inline; \
                              call 'set <name>' and enter the value at the \
@@ -112,17 +108,12 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                         }
                     }
                 }
-                None => println!("error: usage: set <name>"),
             },
-            "rm" => match parts.pop_front() {
-                Some(name) => match validate_secret_name(name) {
-                    Ok(()) => match remove_secret(&mut unlocked, name) {
-                        Ok(_) => println!("Secret '{}' removed", name),
-                        Err(e) => println!("error: {}", e),
-                    },
-                    Err(e) => println!("error: {}", e),
-                },
-                None => println!("error: usage: rm <name>"),
+            "rm" => match named_op(&mut parts, "rm", |name| {
+                remove_secret(&mut unlocked, name).map(|()| println!("Secret '{}' removed", name))
+            }) {
+                Ok(()) => {}
+                Err(e) => println!("error: {}", e),
             },
             "info" => {
                 println!("Vault Information");
@@ -202,6 +193,21 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
 
     // All SecretStrings (passphrase, values) are zeroized here via drop.
     Ok(())
+}
+
+/// Pop a single name argument, validate it, and run an operation against it.
+/// `Err` covers the missing-name, invalid-name, and operation-error cases so
+/// the caller renders one error path.
+fn named_op(
+    parts: &mut VecDeque<&str>,
+    label: &str,
+    op: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let Some(name) = parts.pop_front() else {
+        anyhow::bail!("usage: {} <name>", label);
+    };
+    validate_secret_name(name)?;
+    op(name)
 }
 
 fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str {

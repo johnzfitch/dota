@@ -33,8 +33,6 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -651,42 +649,15 @@ fn create_backup(vault_path: &str) -> Result<()> {
     let backup_name = format!("{}.backup.{}.{}", stem, timestamp, ext);
     let backup_path = parent.join(&backup_name);
 
-    // Symlink protection: refuse to write through a symlink
-    if let Ok(meta) = fs::symlink_metadata(&backup_path)
-        && meta.file_type().is_symlink()
-    {
-        bail!(
-            "Refusing to write backup through symlink: {}",
-            backup_path.display()
-        );
-    }
+    super::ops::reject_symlink_path(&backup_path, "write backup")?;
 
     fs::copy(vault_path, &backup_path)
         .with_context(|| format!("Failed to create vault backup at {}", backup_path.display()))?;
 
-    // Backups contain wrapped private keys, KEM ciphertexts, and encrypted
-    // secrets — every cryptographic byte the live vault holds. `fs::copy`
-    // preserves the source mode on Unix, but lock the backup down to 0600
-    // explicitly so a permissive source mode (e.g. on a vault written before
-    // the chmod hardening landed) cannot bleed into the backup.
-    #[cfg(unix)]
-    {
-        let mut perms = fs::metadata(&backup_path)
-            .with_context(|| {
-                format!(
-                    "Failed to inspect backup permissions at {}",
-                    backup_path.display()
-                )
-            })?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&backup_path, perms).with_context(|| {
-            format!(
-                "Failed to secure backup file permissions at {}",
-                backup_path.display()
-            )
-        })?;
-    }
+    // Backups carry every cryptographic byte the live vault holds. fs::copy
+    // preserves the source mode on Unix; locking the backup to 0o600
+    // explicitly defends against a permissive source mode bleeding through.
+    super::ops::restrict_file_to_owner_rw(&backup_path)?;
 
     eprintln!("Backup saved: {}", backup_path.display());
     Ok(())

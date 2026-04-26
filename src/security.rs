@@ -185,21 +185,17 @@ pub fn shutdown_requested() -> bool {
 
 /// Constant-time byte-slice equality comparison.
 ///
-/// Visits every byte in both slices without short-circuiting and runs
-/// `std::hint::black_box` on the running accumulator so the optimizer
-/// cannot rewrite the loop into an early-exit byte compare. Returns
-/// `false` if the lengths differ; the length check itself is not secret
-/// because length information is observable elsewhere (memory allocations,
-/// I/O, etc.).
+/// Returns `false` if lengths differ. The length check is not secret —
+/// length is observable elsewhere (allocations, I/O). On equal-length
+/// inputs, every byte is visited and `std::hint::black_box` runs on the
+/// running accumulator each iteration to prevent the optimizer from
+/// short-circuiting once `acc` becomes non-zero.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     let mut acc: u8 = 0;
     for (x, y) in a.iter().zip(b.iter()) {
-        // black_box on the running accumulator forces the compiler to
-        // treat each iteration as having an opaque side effect, blocking
-        // it from short-circuiting once `acc` is non-zero.
         acc = std::hint::black_box(acc | (x ^ y));
     }
     std::hint::black_box(acc) == 0
