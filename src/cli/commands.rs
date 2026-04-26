@@ -3,9 +3,9 @@
 use crate::security::SecretString;
 use crate::vault::ops::{
     change_passphrase, create_vault, default_vault_path, get_secret, list_secrets, remove_secret,
-    rotate_keys, set_secret, unlock_vault,
+    rotate_keys, set_secret, unlock_vault, validate_secret_name,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rpassword::prompt_password;
 use zeroize::Zeroize;
 
@@ -20,8 +20,8 @@ fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str 
     }
 }
 
-/// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
-/// Returns a SecretString for automatic zeroization on drop.
+/// Read passphrase from `DOTA_PASSPHRASE` if set and non-empty, otherwise
+/// from an interactive non-echoing prompt. Returns a `SecretString`.
 fn read_passphrase(prompt: &str) -> Result<SecretString> {
     if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
         && !p.is_empty()
@@ -43,7 +43,6 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Creating new vault at: {}", vault_path);
     println!();
 
-    // Prompt for passphrase (wrapped in SecretString for zeroization)
     let passphrase = SecretString::new(prompt_password("Enter passphrase: ")?);
     let confirm = SecretString::new(prompt_password("Confirm passphrase: ")?);
 
@@ -62,45 +61,25 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Vault created successfully!");
     println!("Location: {}", vault_path);
     println!();
-    println!("Use 'dota set <name> <value>' to add secrets");
+    println!(
+        "Use 'dota set <name>' to add secrets (the value is read from a non-echoing prompt or stdin)"
+    );
     println!("Use 'dota unlock' to enter interactive TUI mode");
 
     Ok(())
 }
 
 /// Handle 'set' command
-pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String>) -> Result<()> {
+pub fn handle_set(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Get value from args, stdin (if piped), or interactive prompt
-    let secret_value = match value {
-        Some(v) => SecretString::new(v),
-        None => {
-            use std::io::{IsTerminal, Read};
-            if std::io::stdin().is_terminal() {
-                SecretString::new(prompt_password(format!("Enter value for '{}': ", name))?)
-            } else {
-                let mut buf = String::new();
-                std::io::stdin()
-                    .take(1024 * 1024)
-                    .read_to_string(&mut buf)?;
-                let trimmed = buf.trim_end().to_string();
-                buf.zeroize();
-                if trimmed.is_empty() {
-                    anyhow::bail!(
-                        "empty value from stdin; pass a value as an argument or use an interactive terminal"
-                    );
-                }
-                SecretString::new(trimmed)
-            }
-        }
-    };
+    validate_secret_name(&name)?;
 
-    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let secret_value = read_secret_value(&name)?;
+
     let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
-    // Set secret
     set_secret(&mut unlocked, &name, secret_value.expose())?;
 
     println!("Secret '{}' saved", name);
@@ -108,15 +87,51 @@ pub fn handle_set(vault_path: Option<String>, name: String, value: Option<String
     Ok(())
 }
 
+/// Read a value from stdin (when piped) or from a non-echoing prompt. The
+/// stdin path reads at most `MAX_STDIN_SECRET_BYTES` and trims a trailing
+/// CR/LF in place.
+fn read_secret_value(name: &str) -> Result<SecretString> {
+    use std::io::{IsTerminal, Read};
+
+    const MAX_STDIN_SECRET_BYTES: usize = 1024 * 1024;
+
+    if std::io::stdin().is_terminal() {
+        return Ok(SecretString::new(prompt_password(format!(
+            "Enter value for '{}': ",
+            name
+        ))?));
+    }
+
+    let mut buf = String::new();
+    let n = std::io::stdin()
+        .take(MAX_STDIN_SECRET_BYTES as u64 + 1)
+        .read_to_string(&mut buf)?;
+    if n > MAX_STDIN_SECRET_BYTES {
+        buf.zeroize();
+        anyhow::bail!(
+            "value exceeds {} bytes; refusing to read further",
+            MAX_STDIN_SECRET_BYTES
+        );
+    }
+    let trimmed_len = buf.trim_end_matches(['\r', '\n']).len();
+    buf.truncate(trimmed_len);
+    if buf.is_empty() {
+        anyhow::bail!(
+            "empty value from stdin; provide the value via the interactive prompt or pipe non-empty input"
+        );
+    }
+    Ok(SecretString::new(buf))
+}
+
 /// Handle 'get' command
 pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault (accepts DOTA_PASSPHRASE env var for non-interactive/daemon use)
+    validate_secret_name(&name)?;
+
     let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
-    // Get and print secret (SecretString zeroized after printing)
     let value = get_secret(&unlocked, &name)?;
     println!("{}", value.expose());
 
@@ -127,11 +142,9 @@ pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
 pub fn handle_list(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
     let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
-    // List secrets
     let names = list_secrets(&unlocked);
 
     if names.is_empty() {
@@ -154,6 +167,8 @@ pub fn handle_list(vault_path: Option<String>) -> Result<()> {
 /// Handle 'rm' command
 pub fn handle_rm(vault_path: Option<String>, name: String) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
+
+    validate_secret_name(&name)?;
 
     // Unlock vault
     let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
@@ -221,7 +236,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
                 .iter()
                 .map(|v| format!("v{}", v))
                 .collect::<Vec<_>>()
-                .join(" → ")
+                .join(" -> ")
         );
     }
 
@@ -282,8 +297,9 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
         anyhow::bail!("No vault found at: {}", vault_path);
     }
 
-    // Read vault to check version before prompting for passphrase
-    let json = std::fs::read_to_string(&vault_path).context("Failed to read vault file")?;
+    // Read once via the bounded helper so we honour the same size cap as
+    // the unlock path before parsing.
+    let json = crate::vault::ops::read_vault_file(&vault_path)?;
     let probe: serde_json::Value =
         serde_json::from_str(&json).context("Failed to parse vault file")?;
     let version = probe["version"].as_u64().context("Missing version field")?;
@@ -306,5 +322,3 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     println!("Vault upgraded successfully to v{}.", VAULT_VERSION);
     Ok(())
 }
-
-use anyhow::Context;
