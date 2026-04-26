@@ -1,28 +1,25 @@
-//! Process-level security hardening and secret memory types
+//! Process-level setup and wrappers for in-memory key material
 //!
 //! Provides:
-//! - `SecretString` / `SecretVec`: heap wrappers that zero memory on drop
-//! - OS hardening: disable core dumps, ptrace, swap for secrets
-//! - Signal handling: ensure destructors run on SIGTERM/SIGINT
+//! - `SecretString` / `SecretVec`: heap wrappers that wipe on drop
+//! - Linux process setup: rlimit, prctl, mlockall via raw FFI
+//! - Signal handling for graceful shutdown
 //!
-//! Uses raw FFI to avoid adding the `libc` crate as a dependency.
+//! Uses raw FFI to avoid pulling `libc` into the dependency graph.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// ── Secret memory types ─────────────────────────────────────────────────────
+// ── Wrapping types for in-memory bytes ──────────────────────────────────────
 
-/// A `String` that is zeroized on drop.
-///
-/// Use for passphrases, plaintext secrets, and any other sensitive string data
-/// that must not persist on the heap after the variable goes out of scope.
+/// `String` that wipes its buffer on drop. Use for passphrases and other
+/// in-memory string values that should not linger on the heap.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
 
 impl SecretString {
-    /// Wrap a `String` in a zeroizing wrapper.
-    /// The original `String`'s buffer is moved (not copied).
+    /// Wrap a `String`. The buffer is moved, not copied.
     pub fn new(s: String) -> Self {
         Self(s)
     }
@@ -39,15 +36,13 @@ impl fmt::Debug for SecretString {
     }
 }
 
-/// A `Vec<u8>` that is zeroized on drop.
-///
-/// Use for decrypted key bytes, plaintext buffers, and any other sensitive
-/// byte data that must not persist on the heap.
+/// `Vec<u8>` that wipes its buffer on drop. Use for decrypted byte buffers
+/// and other in-memory values that should not linger on the heap.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretVec(Vec<u8>);
 
 impl SecretVec {
-    /// Wrap a `Vec<u8>` in a zeroizing wrapper.
+    /// Wrap a `Vec<u8>`.
     pub fn new(v: Vec<u8>) -> Self {
         Self(v)
     }
@@ -58,8 +53,8 @@ impl SecretVec {
     }
 
     /// Consume the wrapper and return the inner `Vec<u8>`.
-    /// **Caller must ensure the returned Vec is zeroized or moved into
-    /// another zeroizing container.**
+    /// **Caller must ensure the returned Vec is wiped or moved into another
+    /// wrapping container.**
     pub fn into_inner(mut self) -> Vec<u8> {
         std::mem::take(&mut self.0)
     }
@@ -71,7 +66,7 @@ impl fmt::Debug for SecretVec {
     }
 }
 
-// ── OS-level hardening (raw FFI — no libc crate dependency) ─────────────────
+// ── Process setup (raw FFI — no libc crate dependency) ─────────────────────
 
 // Linux constants (stable ABI)
 #[cfg(target_os = "linux")]
@@ -102,10 +97,8 @@ mod linux {
     }
 }
 
-/// Apply OS-level security hardening at process startup.
-///
-/// Best-effort: failures are logged to stderr but do not abort (the user
-/// may lack `CAP_IPC_LOCK` or be on a non-Linux platform).
+/// Apply process setup at startup. Best-effort; failures are logged to
+/// stderr and do not abort.
 pub fn harden_process() {
     #[cfg(target_os = "linux")]
     {
@@ -117,40 +110,32 @@ pub fn harden_process() {
 fn harden_linux() {
     use linux::*;
     unsafe {
-        // 1. Disable core dumps — prevents secrets from being written to disk
-        //    on crash or signal-induced core generation.
         let rlim = Rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
         if setrlimit(RLIMIT_CORE, &rlim) != 0 {
-            eprintln!("warning: failed to disable core dumps");
+            eprintln!("warning: failed to set RLIMIT_CORE");
         }
 
-        // 2. Mark process as non-dumpable — blocks ptrace attach and
-        //    /proc/self/mem reads by same-UID processes.
         if prctl(PR_SET_DUMPABLE, 0i32) != 0 {
             eprintln!("warning: failed to set PR_SET_DUMPABLE");
         }
 
-        // 3. Lock current and future pages into RAM — prevents swap-to-disk.
-        //    Requires CAP_IPC_LOCK; silently ignore EPERM.
+        // Requires CAP_IPC_LOCK; EPERM is silently ignored.
         let _ = mlockall(MCL_CURRENT | MCL_FUTURE);
     }
 }
 
 // ── Signal handling ─────────────────────────────────────────────────────────
 
-/// Global flag set by signal handlers to request graceful shutdown.
-/// Checked by the TUI event loop and long-running operations.
+/// Set by signal handlers. Polled by the TUI loop and other long-running
+/// operations.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Install signal handlers for SIGTERM, SIGINT, and SIGHUP.
-///
-/// First signal sets `SHUTDOWN_REQUESTED`, allowing destructors (and thus
-/// `ZeroizeOnDrop`) to fire during graceful exit. A second signal restores
-/// the default handler and re-raises, providing the standard double-signal
-/// force-kill escape hatch.
+/// Install handlers for SIGTERM, SIGINT, SIGHUP. The first delivery sets
+/// `SHUTDOWN_REQUESTED` so the program can unwind through normal drops; a
+/// second delivery restores the default action and re-raises.
 pub fn install_signal_handlers() {
     #[cfg(target_os = "linux")]
     {
@@ -166,7 +151,6 @@ pub fn install_signal_handlers() {
 #[cfg(target_os = "linux")]
 extern "C" fn signal_handler(sig: std::os::raw::c_int) {
     if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-        // Second signal — restore default action and re-raise for immediate exit.
         unsafe {
             linux::signal(sig, linux::SIG_DFL);
             linux::raise(sig);
@@ -176,26 +160,26 @@ extern "C" fn signal_handler(sig: std::os::raw::c_int) {
     }
 }
 
-/// Check whether a graceful shutdown has been requested.
+/// Whether a graceful shutdown has been requested.
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
 
-// ── Constant-time utilities ─────────────────────────────────────────────────
+// ── Comparison utilities ────────────────────────────────────────────────────
 
-/// Constant-time byte-slice equality comparison.
-///
-/// Visits every byte in both slices without short-circuiting.
-/// Returns `false` if lengths differ.
+/// Length-checked byte-slice equality with no early exit on mismatching bytes.
+/// Returns `false` if lengths differ. On equal-length inputs every byte is
+/// visited and `std::hint::black_box` runs each iteration so the compiler
+/// cannot optimise the loop into an early exit.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let xor = a
-        .iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (&x, &y)| acc | (x ^ y));
-    xor == 0
+    let mut acc: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc = std::hint::black_box(acc | (x ^ y));
+    }
+    std::hint::black_box(acc) == 0
 }
 
 #[cfg(test)]
