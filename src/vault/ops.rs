@@ -185,20 +185,36 @@ pub(crate) fn restrict_file_to_owner_rw(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read a vault file from disk with two defensive bounds in place:
-///
-/// 1. **Symlink refusal** — the path is rejected if it points at a symlink.
-/// 2. **Hard size cap on the bytes actually read** — pre-checking metadata
-///    alone is racy (the file can grow or be swapped between the metadata
-///    call and the read), so the bound is enforced on the bytes we actually
-///    pull into memory via `take(MAX_VAULT_FILE_BYTES + 1)`.
+/// Open a vault file for reading. On Unix the open refuses to traverse a
+/// final-component symlink at the syscall boundary; on other platforms it
+/// falls through to the platform's default open and relies on the caller's
+/// pre-check.
+#[cfg(unix)]
+fn open_vault_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_vault_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Read a vault file from disk with defensive bounds in place. The pre-check
+/// gives a clean error wording for the common case; the open enforces the
+/// final-component check at the syscall boundary so the result cannot be
+/// swapped between the two; the read is bounded so a file that grows after
+/// the open cannot allocate past the cap.
 pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
     use std::io::Read;
 
     let path_ref = Path::new(vault_path);
     reject_symlink_path(path_ref, "read")?;
 
-    let mut file = fs::File::open(vault_path).context("Failed to read vault file")?;
+    let mut file = open_vault_file_for_read(path_ref).context("Failed to read vault file")?;
 
     if let Ok(metadata) = file.metadata()
         && metadata.len() > MAX_VAULT_FILE_BYTES
@@ -352,16 +368,18 @@ fn decrypt_vault_private_keys(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
-    let mlkem_sk_bytes = Zeroizing::new(
+    // Move the decrypted Vec straight into MlKemPrivateKey (ZeroizeOnDrop).
+    // An intermediate Zeroizing<Vec<u8>> + .to_vec() would clone the secret
+    // onto a second heap allocation that the wrapper does not cover.
+    let mlkem_private = MlKemPrivateKey::from_bytes(
         aes_decrypt(
             &wrapping.mlkem,
             &vault.kem.encrypted_private_key,
             &mlkem_nonce,
         )
         .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
-    );
-    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())
-        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+    )
+    .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
 
     let x25519_nonce: [u8; AES_GCM_NONCE_LEN] = vault
         .x25519
@@ -377,10 +395,16 @@ fn decrypt_vault_private_keys(
         )
         .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
     );
-    let x25519_private = X25519PrivateKey::from_bytes(
-        <&[u8] as TryInto<[u8; 32]>>::try_into(x25519_sk_bytes.as_ref())
-            .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
-    );
+    // try_into materializes a fresh [u8; 32]. Because [u8; 32] is Copy,
+    // X25519PrivateKey::from_bytes copies the array; the caller's local
+    // survives the call and must be wiped explicitly.
+    let mut x25519_arr: [u8; 32] = x25519_sk_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+    let x25519_private = X25519PrivateKey::from_bytes(x25519_arr);
+    x25519_arr.zeroize();
+    std::hint::black_box(&x25519_arr);
 
     Ok((mlkem_private, x25519_private))
 }

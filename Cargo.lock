@@ -716,6 +716,7 @@ dependencies = [
  "dirs",
  "hkdf",
  "hmac",
+ "libc",
  "ml-kem",
  "pqcrypto-kyber",
  "pqcrypto-traits",
