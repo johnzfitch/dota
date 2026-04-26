@@ -5,7 +5,7 @@ use super::format::{
     V6_SECRET_ALGORITHM, V6_VAULT_VERSION, V7_KEM_ALGORITHM, V7_SECRET_ALGORITHM, V7_SUITE,
     V7_VAULT_VERSION, V7_X25519_ALGORITHM, VAULT_VERSION, Vault, X25519KeyPair,
 };
-use crate::crypto::hybrid::{hybrid_decapsulate_v7, hybrid_encapsulate_v7};
+use crate::crypto::hybrid::{hybrid_decapsulate_v6, hybrid_decapsulate_v7, hybrid_encapsulate_v7};
 use crate::crypto::{
     AesKey, KdfConfig, MasterKey, MlKemCiphertext, MlKemPrivateKey, MlKemPublicKey,
     X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key, generate_salt,
@@ -25,7 +25,7 @@ use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 const KDF_ALGORITHM: &str = "argon2id";
 const SECRET_ALGORITHM: &str = "hybrid-mlkem768-x25519";
@@ -133,10 +133,10 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     };
     vault.key_commitment = Some(compute_key_commitment(&master_key, &vault)?);
 
-    // Create parent directory if needed
-    if let Some(parent) = Path::new(vault_path).parent() {
-        fs::create_dir_all(parent).context("Failed to create vault directory")?;
-    }
+    // `save_vault_file` will create and harden the parent directory as
+    // part of the atomic-write path; no need to pre-create it here. Doing
+    // a separate `fs::create_dir_all` first would briefly expose the
+    // directory at the umask-default mode before it is chmod'd to 0700.
 
     // Write vault to file with atomic replace and restrictive permissions.
     save_vault_file(vault_path, &vault)?;
@@ -144,17 +144,108 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Unlock a vault with a passphrase
-pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
-    let vault_path_ref = Path::new(vault_path);
-    if let Ok(meta) = fs::symlink_metadata(vault_path_ref)
+/// Maximum vault file size accepted on disk.
+///
+/// A real-world vault — KEM public key + wrapped private keys + a few
+/// thousand secrets — fits well under a megabyte. The cap exists to defeat
+/// resource-exhaustion attacks where a hostile vault file (e.g. a vault
+/// planted in a shared directory) tries to make `serde_json` allocate
+/// unbounded memory before any cryptographic check has run.
+pub(crate) const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Refuse to operate on a path that resolves to a symlink. Centralized so
+/// every read/write path enforces the same policy and error wording.
+pub(crate) fn reject_symlink_path(path: &Path, action: &str) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
-        anyhow::bail!("Refusing to read vault through symlink: {}", vault_path);
+        anyhow::bail!(
+            "Refusing to {} vault through symlink: {}",
+            action,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Tighten an existing on-disk file to mode 0o600 (owner-only rw). No-op
+/// on non-Unix.
+#[cfg(unix)]
+pub(crate) fn restrict_file_to_owner_rw(path: &Path) -> Result<()> {
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("Failed to inspect permissions for {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("Failed to secure file permissions for {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restrict_file_to_owner_rw(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Open a vault file for reading. On Unix the open refuses to traverse a
+/// final-component symlink at the syscall boundary; on other platforms it
+/// falls through to the platform's default open and relies on the caller's
+/// pre-check.
+#[cfg(unix)]
+fn open_vault_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_vault_file_for_read(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Read a vault file from disk with defensive bounds in place. The pre-check
+/// gives a clean error wording for the common case; the open enforces the
+/// final-component check at the syscall boundary so the result cannot be
+/// swapped between the two; the read is bounded so a file that grows after
+/// the open cannot allocate past the cap.
+pub(crate) fn read_vault_file(vault_path: &str) -> Result<String> {
+    use std::io::Read;
+
+    let path_ref = Path::new(vault_path);
+    reject_symlink_path(path_ref, "read")?;
+
+    let mut file = open_vault_file_for_read(path_ref).context("Failed to read vault file")?;
+
+    if let Ok(metadata) = file.metadata()
+        && metadata.len() > MAX_VAULT_FILE_BYTES
+    {
+        anyhow::bail!(
+            "Vault file size {} bytes exceeds {}-byte sanity cap; refusing to load",
+            metadata.len(),
+            MAX_VAULT_FILE_BYTES
+        );
     }
 
-    // Read and parse vault file, migrating if needed
-    let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
+    let mut buf = String::new();
+    let read = (&mut file)
+        .take(MAX_VAULT_FILE_BYTES + 1)
+        .read_to_string(&mut buf)
+        .context("Failed to read vault file")?;
+    if read as u64 > MAX_VAULT_FILE_BYTES {
+        // Drop the partial read so it never appears in any later error context.
+        buf.zeroize();
+        anyhow::bail!(
+            "Vault file exceeds {}-byte sanity cap; refusing to load",
+            MAX_VAULT_FILE_BYTES
+        );
+    }
+
+    Ok(buf)
+}
+
+/// Unlock a vault with a passphrase
+pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault> {
+    let json = read_vault_file(vault_path)?;
 
     let probe: super::legacy::VaultVersionProbe =
         serde_json::from_str(&json).context("Failed to parse vault version")?;
@@ -263,31 +354,134 @@ fn decrypt_vault_private_keys(
     vault: &Vault,
     master_key: &MasterKey,
 ) -> Result<(MlKemPrivateKey, X25519PrivateKey)> {
+    // Key commitment runs before this function, so a failure here means
+    // vault corruption rather than wrong passphrase. Surface one uniform
+    // error so an observer cannot tell which arm failed first or distinguish
+    // wrong-passphrase from corruption.
+    const VAULT_DECRYPT_ERROR: &str =
+        "Vault decryption failed — vault file may be corrupted or tampered with";
+
     let wrapping = derive_wrapping_keys_for_vault_version(vault.version, master_key)?;
-    let mlkem_sk_bytes = Zeroizing::new(
+    let mlkem_nonce: [u8; AES_GCM_NONCE_LEN] = vault
+        .kem
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+    // Move the decrypted Vec straight into MlKemPrivateKey (ZeroizeOnDrop).
+    // An intermediate Zeroizing<Vec<u8>> + .to_vec() would clone the secret
+    // onto a second heap allocation that the wrapper does not cover.
+    let mlkem_private = MlKemPrivateKey::from_bytes(
         aes_decrypt(
             &wrapping.mlkem,
             &vault.kem.encrypted_private_key,
-            vault.kem.private_key_nonce.as_slice().try_into()?,
+            &mlkem_nonce,
         )
-        .context("Failed to decrypt ML-KEM private key (wrong passphrase?)")?,
-    );
-    let mlkem_private = MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
+    )
+    .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
 
+    let x25519_nonce: [u8; AES_GCM_NONCE_LEN] = vault
+        .x25519
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
     let x25519_sk_bytes = Zeroizing::new(
         aes_decrypt(
             &wrapping.x25519,
             &vault.x25519.encrypted_private_key,
-            vault.x25519.private_key_nonce.as_slice().try_into()?,
+            &x25519_nonce,
         )
-        .context("Failed to decrypt X25519 private key (wrong passphrase?)")?,
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?,
     );
-    let x25519_private = X25519PrivateKey::from_bytes(
-        <&[u8] as TryInto<[u8; 32]>>::try_into(x25519_sk_bytes.as_ref())
-            .context("Invalid X25519 key length")?,
-    );
+    // try_into materializes a fresh [u8; 32]. Because [u8; 32] is Copy,
+    // X25519PrivateKey::from_bytes copies the array; the caller's local
+    // survives the call and must be wiped explicitly.
+    let mut x25519_arr: [u8; 32] = x25519_sk_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!(VAULT_DECRYPT_ERROR))?;
+    let x25519_private = X25519PrivateKey::from_bytes(x25519_arr);
+    x25519_arr.zeroize();
+    std::hint::black_box(&x25519_arr);
 
     Ok((mlkem_private, x25519_private))
+}
+
+/// Decrypt the v6 private keys held in a v6 vault. Used by the migration
+/// engine to drive a v6 -> v7 step.
+pub(crate) fn decrypt_v6_private_keys(
+    v6: &Vault,
+    master_key: &MasterKey,
+) -> Result<(MlKemPrivateKey, X25519PrivateKey)> {
+    let wrapping = derive_wrapping_keys_v6(master_key)?;
+
+    let mlkem_nonce: [u8; AES_GCM_NONCE_LEN] = v6
+        .kem
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .context("Invalid v6 ML-KEM nonce length")?;
+    let mlkem_private = MlKemPrivateKey::from_bytes(
+        aes_decrypt(&wrapping.mlkem, &v6.kem.encrypted_private_key, &mlkem_nonce)
+            .context("Failed to decrypt v6 ML-KEM private key (wrong passphrase?)")?,
+    )
+    .context("Invalid v6 ML-KEM private key length")?;
+
+    let x25519_nonce: [u8; AES_GCM_NONCE_LEN] = v6
+        .x25519
+        .private_key_nonce
+        .as_slice()
+        .try_into()
+        .context("Invalid v6 X25519 nonce length")?;
+    let x25519_sk_bytes = Zeroizing::new(
+        aes_decrypt(
+            &wrapping.x25519,
+            &v6.x25519.encrypted_private_key,
+            &x25519_nonce,
+        )
+        .context("Failed to decrypt v6 X25519 private key (wrong passphrase?)")?,
+    );
+    let mut x25519_arr: [u8; 32] = x25519_sk_bytes
+        .as_slice()
+        .try_into()
+        .context("Invalid v6 X25519 private key length")?;
+    let x25519_private = X25519PrivateKey::from_bytes(x25519_arr);
+    x25519_arr.zeroize();
+    std::hint::black_box(&x25519_arr);
+
+    Ok((mlkem_private, x25519_private))
+}
+
+/// Decrypt one v6 secret to its plaintext bytes. Returned `Zeroizing` wipes
+/// the buffer when dropped.
+pub(crate) fn decrypt_v6_secret(
+    name: &str,
+    secret: &EncryptedSecret,
+    mlkem_priv: &MlKemPrivateKey,
+    x25519_priv: &X25519PrivateKey,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let kem_ct = MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone())
+        .with_context(|| format!("Invalid ML-KEM ciphertext for secret '{}'", name))?;
+    let x25519_eph_pk = X25519PublicKey::from_bytes(
+        secret
+            .x25519_ephemeral_public
+            .as_slice()
+            .try_into()
+            .with_context(|| format!("Invalid X25519 ephemeral key for secret '{}'", name))?,
+    );
+    let aes_key = hybrid_decapsulate_v6(mlkem_priv, x25519_priv, &kem_ct, &x25519_eph_pk)?;
+    let nonce: [u8; AES_GCM_NONCE_LEN] = secret
+        .nonce
+        .as_slice()
+        .try_into()
+        .with_context(|| format!("Invalid nonce for secret '{}'", name))?;
+    Ok(Zeroizing::new(aes_decrypt(
+        &aes_key,
+        &secret.ciphertext,
+        &nonce,
+    )?))
 }
 
 /// Add or update a secret in the vault
@@ -531,8 +725,19 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
     let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
 
-    // Convert to String, consuming the SecretVec (inner bytes zeroized on drop)
-    let s = String::from_utf8(plaintext.into_inner()).context("Secret contains invalid UTF-8")?;
+    // Convert to String. On UTF-8 failure, `String::from_utf8` returns a
+    // `FromUtf8Error` that owns the original bytes — if we propagated that
+    // error directly, the plaintext would survive (un-zeroized) inside the
+    // anyhow chain. Catch the error, zeroize the recovered bytes, and surface
+    // a content-free message instead.
+    let s = match String::from_utf8(plaintext.into_inner()) {
+        Ok(s) => s,
+        Err(err) => {
+            let mut leaked = err.into_bytes();
+            leaked.zeroize();
+            anyhow::bail!("Secret contains invalid UTF-8");
+        }
+    };
     Ok(SecretString::new(s))
 }
 
@@ -563,16 +768,12 @@ fn save_vault(unlocked: &UnlockedVault) -> Result<()> {
 /// Safely save vault JSON to disk with symlink protection and atomic replace.
 pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     let vault_path = Path::new(path);
-    if let Ok(meta) = fs::symlink_metadata(vault_path)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!("Refusing to write vault through symlink: {}", path);
-    }
+    reject_symlink_path(vault_path, "write")?;
 
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("."));
     let parent_existed = parent.exists();
     if !parent_existed {
-        fs::create_dir_all(parent).context("Failed to create vault directory")?;
+        create_vault_directory(parent)?;
     }
 
     #[cfg(unix)]
@@ -594,19 +795,33 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     tmp.persist(vault_path)
         .context("Failed to persist vault file")?;
 
-    #[cfg(unix)]
-    {
-        let mut perms = fs::metadata(vault_path)
-            .context("Failed to inspect vault file permissions")?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(vault_path, perms).context("Failed to secure vault file")?;
-    }
+    restrict_file_to_owner_rw(vault_path)?;
 
     if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
     }
 
+    Ok(())
+}
+
+/// Create the vault parent directory with 0700 from inception on Unix to
+/// avoid a TOCTOU window in which a freshly-created directory exists at
+/// the umask default before it is chmod'd. On non-Unix platforms this is
+/// equivalent to `fs::create_dir_all`.
+fn create_vault_directory(parent: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
+            .create(parent)
+            .context("Failed to create vault directory")?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(parent).context("Failed to create vault directory")?;
+    }
     Ok(())
 }
 
@@ -863,11 +1078,11 @@ pub(crate) fn compute_key_commitment(master_key: &MasterKey, vault: &Vault) -> R
 /// Migrate a vault file to the current format version.
 ///
 /// - Versions < 4 are rejected (no vaults in the wild).
-/// - Version 4 → 5: adds key commitment, bumps version.
+/// - Version 4 to 5: adds key commitment, bumps version.
 /// - Version 5: already current, no-op.
 #[allow(dead_code)]
 pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
-    let json = fs::read_to_string(vault_path).context("Failed to read vault file")?;
+    let json = read_vault_file(vault_path)?;
     let mut vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
 
     if vault.version < MIN_VAULT_VERSION {
@@ -881,7 +1096,7 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         return Ok(()); // Already current
     }
 
-    // v4 → v5: derive master key, compute commitment, save
+    // v4 to v5: derive master key, compute commitment, save
     let kdf_config = KdfConfig {
         salt: vault.kdf.salt.clone(),
         time_cost: vault.kdf.time_cost,
@@ -894,6 +1109,57 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
     vault.key_commitment = Some(compute_key_commitment(&master_key, &vault)?);
     save_vault_file(vault_path, &vault)?;
 
+    Ok(())
+}
+
+/// Validate a secret name against the project-wide rules.
+///
+/// Used at every point a secret name enters the system — direct CLI/TUI
+/// input *and* names parsed out of a vault file on unlock — so that no
+/// downstream caller (including `list` rendering, shell-export naming,
+/// and informational output) ever sees a name carrying ASCII control
+/// characters, terminal escape sequences, bidi overrides, zero-width or
+/// BOM characters, or Unicode line/paragraph separators.
+///
+/// Without this check, a name like `API\u{202E}KEY` could spoof an
+/// existing entry in `list`/TUI output, and a name embedding ESC could
+/// rewrite the operator's terminal during a benign `list`.
+pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
+    const MAX_SECRET_NAME_BYTES: usize = 256;
+
+    if name.is_empty() {
+        anyhow::bail!("secret name must not be empty");
+    }
+    if name.len() > MAX_SECRET_NAME_BYTES {
+        anyhow::bail!("secret name exceeds {} bytes", MAX_SECRET_NAME_BYTES);
+    }
+    if name.trim() != name {
+        anyhow::bail!("secret name must not have leading or trailing whitespace");
+    }
+    for ch in name.chars() {
+        if ch.is_control() {
+            anyhow::bail!(
+                "secret name contains a control character (U+{:04X})",
+                ch as u32
+            );
+        }
+        // Bidi controls, zero-width, BOM, and Unicode line/paragraph
+        // separators allow visually identical names to differ in bytes.
+        if matches!(
+            ch as u32,
+            0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2066..=0x2069
+                | 0xFEFF
+                | 0x2028
+                | 0x2029
+        ) {
+            anyhow::bail!(
+                "secret name contains a disallowed format character (U+{:04X})",
+                ch as u32
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1023,6 +1289,15 @@ fn validate_v7_vault(vault: &Vault) -> Result<()> {
     }
 
     for (name, secret) in &vault.secrets {
+        validate_secret_name(name).with_context(|| {
+            // Names from a hostile or tampered vault file go through this
+            // path before they ever reach `list`/TUI rendering. Catching
+            // them here means an attacker cannot smuggle terminal escape
+            // sequences or bidi-override confusables into operator output
+            // by handing the user a poisoned vault.
+            format!("Invalid secret name in vault file: {:?}", name)
+        })?;
+
         if secret.algorithm != V7_SECRET_ALGORITHM {
             anyhow::bail!(
                 "Unsupported secret algorithm for '{}': {} (expected {})",
@@ -1644,5 +1919,100 @@ mod tests {
             let mode = fs::metadata(vault_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn test_unlock_rejects_oversized_vault_file() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Plant a JSON-shaped file that comfortably exceeds the cap. We do
+        // not need it to be a valid vault — the size check runs before any
+        // parsing.
+        let oversized = vec![b'A'; (MAX_VAULT_FILE_BYTES + 1) as usize];
+        fs::write(vault_path, oversized).unwrap();
+
+        let err = unlock_vault("test-passphrase", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unlock_rejects_vault_with_malicious_secret_name() {
+        let tmp = NamedTempFile::new().unwrap();
+        let vault_path = tmp.path().to_str().unwrap();
+
+        // Build a normal v7 vault, then rewrite the secret map under a name
+        // carrying a bidi override. This is the "poisoned vault" case the
+        // reviewer flagged: a hostile vault file presenting confusable
+        // entries to operator output.
+        create_vault("test-pass", vault_path).unwrap();
+        let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
+        set_secret(&mut unlocked, "API_KEY", "sk-12345").unwrap();
+
+        let mut vault: Vault =
+            serde_json::from_str(&fs::read_to_string(vault_path).unwrap()).unwrap();
+        let secret = vault.secrets.remove("API_KEY").unwrap();
+        vault.secrets.insert("API\u{202E}KEY".to_string(), secret);
+        fs::write(vault_path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
+
+        let err = unlock_vault("test-pass", vault_path).unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid secret name"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_secret_name_accepts_typical_identifiers() {
+        validate_secret_name("API_KEY").unwrap();
+        validate_secret_name("aws/prod/access-token").unwrap();
+        validate_secret_name("user@example.com").unwrap();
+        validate_secret_name("π-token").unwrap();
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_empty() {
+        assert!(validate_secret_name("").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_whitespace_padding() {
+        assert!(validate_secret_name(" API_KEY").is_err());
+        assert!(validate_secret_name("API_KEY ").is_err());
+        assert!(validate_secret_name("\tAPI_KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_control_characters() {
+        assert!(validate_secret_name("API\nKEY").is_err());
+        assert!(validate_secret_name("API\rKEY").is_err());
+        assert!(validate_secret_name("API\x00KEY").is_err());
+        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC — terminal escape
+        assert!(validate_secret_name("API\x7fKEY").is_err()); // DEL
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_bidi_and_format_overrides() {
+        // Right-to-Left Override — classic confusable-name attack.
+        assert!(validate_secret_name("API\u{202E}KEY").is_err());
+        // Left-to-Right Override.
+        assert!(validate_secret_name("API\u{202D}KEY").is_err());
+        // Zero-Width Space — invisible in `list` output.
+        assert!(validate_secret_name("API\u{200B}KEY").is_err());
+        // Byte Order Mark / ZWNBSP.
+        assert!(validate_secret_name("\u{FEFF}API_KEY").is_err());
+        // Unicode line separator.
+        assert!(validate_secret_name("API\u{2028}KEY").is_err());
+    }
+
+    #[test]
+    fn validate_secret_name_rejects_oversized() {
+        let huge = "A".repeat(257);
+        assert!(validate_secret_name(&huge).is_err());
     }
 }
