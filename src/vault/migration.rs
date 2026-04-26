@@ -1,13 +1,13 @@
 //! Vault migration engine ("upvault")
 //!
-//! Automatically upgrades vaults from any older version to the current version.
-//! Each version step is handled by a single `upvault_vN` function that converts
-//! version N to N+1. The engine chains these steps to reach the current version.
+//! Upgrades vaults from any older version to the current version. Each
+//! version step is a single `upvault_vN` function that converts N to N+1;
+//! the engine chains them to reach the current version.
 //!
-//! Security invariants:
-//! - Backup is created ONLY after successful in-memory migration (deferred backup)
-//! - All decrypted key material is wrapped in `Zeroizing<T>` for RAII cleanup
-//! - Wrong passphrase / corrupted data → error before any disk writes
+//! Invariants:
+//! - Backup is written only after the in-memory migration chain succeeds
+//! - Decrypted byte buffers live inside `Zeroizing<T>` for the migration
+//! - Errors propagate before any on-disk write
 
 use super::format::{
     EncryptedSecret, KemKeyPair, MigrationInfo, V5_VAULT_VERSION, V6_KEM_ALGORITHM,
@@ -21,8 +21,8 @@ use super::ops::{
     save_vault_file, verify_v5_key_commitment,
 };
 use crate::crypto::hybrid::{
-    hybrid_decapsulate_legacy, hybrid_decapsulate_v6, hybrid_encapsulate_legacy,
-    hybrid_encapsulate_v6, hybrid_encapsulate_v7,
+    hybrid_decapsulate_legacy, hybrid_encapsulate_legacy, hybrid_encapsulate_v6,
+    hybrid_encapsulate_v7,
 };
 use crate::crypto::legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPrivateKey};
 use crate::crypto::{
@@ -38,10 +38,9 @@ use zeroize::Zeroizing;
 
 const MAX_BACKUPS: usize = 5;
 
-/// Migrate a vault from any older version to the current version.
-///
-/// All migration happens in memory first. Backup and disk write occur only
-/// after the full migration chain succeeds. Returns the migrated Vault.
+/// Migrate a vault from any older version to the current version. The
+/// chain runs in memory; the backup and the disk write happen only after
+/// every step has succeeded.
 pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Result<Vault> {
     let probe: VaultVersionProbe =
         serde_json::from_str(original_json).context("Failed to parse vault version")?;
@@ -128,7 +127,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
     save_vault_file(vault_path, &vault)?;
 
     eprintln!(
-        "Migration complete: v{} → v{}",
+        "Migration complete: v{} to v{}",
         probe.version, VAULT_VERSION
     );
 
@@ -136,10 +135,10 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// Step functions: each converts vN → vN+1
+// Step functions: each converts vN to vN+1
 // ---------------------------------------------------------------------------
 
-/// v1 → v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
+/// v1 to v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
 fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     // v1 uses master key directly as AES key for private key wrapping
     let wrapping_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -233,7 +232,7 @@ fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     })
 }
 
-/// v2 → v3: Restructure flat fields into nested structs (no crypto changes)
+/// v2 to v3: Restructure flat fields into nested structs (no crypto changes)
 fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     Ok(VaultV3 {
         version: 3,
@@ -255,7 +254,7 @@ fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     })
 }
 
-/// v3 → v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
+/// v3 to v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
 fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     // v3 uses master key directly as AES key
     let direct_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -316,7 +315,7 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     })
 }
 
-/// v4 → v5: Add the legacy key commitment and anti-rollback floor.
+/// v4 to v5: Add the legacy key commitment and anti-rollback floor.
 ///
 /// This is an internal staging step used only in memory before the final v6 re-key.
 fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
@@ -327,7 +326,7 @@ fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
     Ok(v4)
 }
 
-/// v5 → v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
+/// v5 to v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
 /// rotate both asymmetric keypairs, and re-encrypt everything under real v6 semantics.
 fn upvault_v5_to_v6(
     v5: Vault,
@@ -472,55 +471,20 @@ fn upvault_v5_to_v6(
     Ok(v6)
 }
 
-/// v6 → v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
-///
-/// Decrypts all secrets under v6 hybrid semantics, generates fresh keypairs,
-/// and re-encrypts under v7 TC-HKEM with passphrase commitment.
+/// v6 to v7: re-key and re-encrypt under TC-HKEM. Decrypts all secrets
+/// using the v6 helpers in `ops`, generates fresh keypairs, and re-encrypts
+/// under v7 with passphrase commitment.
 fn upvault_v6_to_v7(
     v6: Vault,
     original_version: u32,
     migration_path: &[u32],
     master_key: &MasterKey,
 ) -> Result<Vault> {
-    // Verify the v6 key commitment before touching private keys
     super::ops::verify_v6_key_commitment(&v6, master_key)?;
 
-    // Decrypt v6 private keys
-    let v6_wrapping = derive_wrapping_keys_v6(master_key)?;
-    let mlkem_sk_bytes = Zeroizing::new(
-        aes_decrypt(
-            &v6_wrapping.mlkem,
-            &v6.kem.encrypted_private_key,
-            v6.kem
-                .private_key_nonce
-                .as_slice()
-                .try_into()
-                .context("Invalid v6 ML-KEM nonce")?,
-        )
-        .context("Failed to decrypt v6 ML-KEM private key (wrong passphrase?)")?,
-    );
-    let v6_mlkem_private = crate::crypto::MlKemPrivateKey::from_bytes(mlkem_sk_bytes.to_vec())?;
+    let (v6_mlkem_private, v6_x25519_private) =
+        super::ops::decrypt_v6_private_keys(&v6, master_key)?;
 
-    let x25519_sk_bytes = Zeroizing::new(
-        aes_decrypt(
-            &v6_wrapping.x25519,
-            &v6.x25519.encrypted_private_key,
-            v6.x25519
-                .private_key_nonce
-                .as_slice()
-                .try_into()
-                .context("Invalid v6 X25519 nonce")?,
-        )
-        .context("Failed to decrypt v6 X25519 private key (wrong passphrase?)")?,
-    );
-    let v6_x25519_private = X25519PrivateKey::from_bytes(
-        x25519_sk_bytes
-            .as_slice()
-            .try_into()
-            .context("Invalid X25519 key length")?,
-    );
-
-    // Decrypt all v6 secrets
     let mut plaintext_secrets = Vec::with_capacity(v6.secrets.len());
     for (name, secret) in &v6.secrets {
         if secret.algorithm != V6_SECRET_ALGORITHM {
@@ -531,29 +495,8 @@ fn upvault_v6_to_v7(
             );
         }
 
-        let kem_ct = crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone())
-            .with_context(|| format!("Invalid ML-KEM ciphertext for secret '{}'", name))?;
-
-        let x25519_eph_pk = X25519PublicKey::from_bytes(
-            secret
-                .x25519_ephemeral_public
-                .as_slice()
-                .try_into()
-                .with_context(|| format!("Invalid X25519 ephemeral key for secret '{}'", name))?,
-        );
-
-        let aes_key = hybrid_decapsulate_v6(
-            &v6_mlkem_private,
-            &v6_x25519_private,
-            &kem_ct,
-            &x25519_eph_pk,
-        )?;
-        let nonce: [u8; 12] = secret
-            .nonce
-            .as_slice()
-            .try_into()
-            .with_context(|| format!("Invalid nonce for secret '{}'", name))?;
-        let plaintext = Zeroizing::new(aes_decrypt(&aes_key, &secret.ciphertext, &nonce)?);
+        let plaintext =
+            super::ops::decrypt_v6_secret(name, secret, &v6_mlkem_private, &v6_x25519_private)?;
         plaintext_secrets.push((name.clone(), plaintext, secret.created, secret.modified));
     }
 
@@ -620,10 +563,9 @@ fn upvault_v6_to_v7(
 // Backup management
 // ---------------------------------------------------------------------------
 
-/// Create a backup of the vault file before overwriting with migrated version.
-///
-/// Uses timestamped filenames with a cap of MAX_BACKUPS to prevent accumulation.
-/// Only called after in-memory migration has fully succeeded.
+/// Create a timestamped backup of the vault file. Old backups are pruned
+/// to keep the count at or below `MAX_BACKUPS`. Only called after the
+/// in-memory migration chain has succeeded.
 fn create_backup(vault_path: &str) -> Result<()> {
     let path = Path::new(vault_path);
     if !path.exists() {
@@ -649,18 +591,14 @@ fn create_backup(vault_path: &str) -> Result<()> {
     let backup_name = format!("{}.backup.{}.{}", stem, timestamp, ext);
     let backup_path = parent.join(&backup_name);
 
-    // Symlink protection: refuse to write through a symlink
-    if let Ok(meta) = fs::symlink_metadata(&backup_path)
-        && meta.file_type().is_symlink()
-    {
-        bail!(
-            "Refusing to write backup through symlink: {}",
-            backup_path.display()
-        );
-    }
+    super::ops::reject_symlink_path(&backup_path, "write backup")?;
 
     fs::copy(vault_path, &backup_path)
         .with_context(|| format!("Failed to create vault backup at {}", backup_path.display()))?;
+
+    // fs::copy preserves the source mode on Unix; pin the backup to 0o600
+    // so a permissive source mode does not bleed through.
+    super::ops::restrict_file_to_owner_rw(&backup_path)?;
 
     eprintln!("Backup saved: {}", backup_path.display());
     Ok(())
