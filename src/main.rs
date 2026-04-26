@@ -30,8 +30,8 @@ fn main() -> Result<()> {
             let vault_path = args.vault.unwrap_or_else(vault::ops::default_vault_path);
             tui::launch_tui(vault_path)?;
         }
-        Some(Commands::Set { name, value }) => {
-            cli::commands::handle_set(args.vault, name, value)?;
+        Some(Commands::Set { name }) => {
+            cli::commands::handle_set(args.vault, name)?;
         }
         Some(Commands::Get { name }) => {
             cli::commands::handle_get(args.vault, name)?;
