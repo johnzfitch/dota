@@ -1088,52 +1088,56 @@ pub(crate) fn validate_secret_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_vault_kdf(vault: &Vault) -> Result<()> {
-    if vault.kdf.algorithm != KDF_ALGORITHM {
+pub(crate) fn validate_kdf_params(kdf: &KdfParams) -> Result<()> {
+    if kdf.algorithm != KDF_ALGORITHM {
         anyhow::bail!(
             "Unsupported KDF algorithm: {} (expected {})",
-            vault.kdf.algorithm,
+            kdf.algorithm,
             KDF_ALGORITHM
         );
     }
 
-    if vault.kdf.salt.len() < MIN_SALT_LEN || vault.kdf.salt.len() > MAX_SALT_LEN {
+    if kdf.salt.len() < MIN_SALT_LEN || kdf.salt.len() > MAX_SALT_LEN {
         anyhow::bail!(
             "Invalid KDF salt length: {} (expected {}..={})",
-            vault.kdf.salt.len(),
+            kdf.salt.len(),
             MIN_SALT_LEN,
             MAX_SALT_LEN
         );
     }
 
-    if !(MIN_TIME_COST..=MAX_TIME_COST).contains(&vault.kdf.time_cost) {
+    if !(MIN_TIME_COST..=MAX_TIME_COST).contains(&kdf.time_cost) {
         anyhow::bail!(
             "Invalid Argon2 time cost: {} (expected {}..={})",
-            vault.kdf.time_cost,
+            kdf.time_cost,
             MIN_TIME_COST,
             MAX_TIME_COST
         );
     }
 
-    if !(MIN_MEMORY_COST_KIB..=MAX_MEMORY_COST_KIB).contains(&vault.kdf.memory_cost) {
+    if !(MIN_MEMORY_COST_KIB..=MAX_MEMORY_COST_KIB).contains(&kdf.memory_cost) {
         anyhow::bail!(
             "Invalid Argon2 memory cost: {} KiB (expected {}..={} KiB)",
-            vault.kdf.memory_cost,
+            kdf.memory_cost,
             MIN_MEMORY_COST_KIB,
             MAX_MEMORY_COST_KIB
         );
     }
 
-    if !(MIN_PARALLELISM..=MAX_PARALLELISM).contains(&vault.kdf.parallelism) {
+    if !(MIN_PARALLELISM..=MAX_PARALLELISM).contains(&kdf.parallelism) {
         anyhow::bail!(
             "Invalid Argon2 parallelism: {} (expected {}..={})",
-            vault.kdf.parallelism,
+            kdf.parallelism,
             MIN_PARALLELISM,
             MAX_PARALLELISM
         );
     }
 
     Ok(())
+}
+
+fn validate_vault_kdf(vault: &Vault) -> Result<()> {
+    validate_kdf_params(&vault.kdf)
 }
 
 fn validate_v7_vault(vault: &Vault) -> Result<()> {
