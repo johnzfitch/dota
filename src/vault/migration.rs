@@ -18,7 +18,7 @@ use super::format::{
 use super::legacy::{VaultV1, VaultV2, VaultV3, VaultVersionProbe};
 use super::ops::{
     compute_key_commitment, derive_wrapping_keys, derive_wrapping_keys_v6, derive_wrapping_keys_v7,
-    save_vault_file, verify_v5_key_commitment,
+    save_vault_file, validate_kdf_params, verify_v5_key_commitment,
 };
 use crate::crypto::hybrid::{
     hybrid_decapsulate_legacy, hybrid_decapsulate_v6, hybrid_encapsulate_legacy,
@@ -66,9 +66,18 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
         bail!("Unknown vault version: 0");
     }
 
-    // Derive master key once — shared across all migration steps
+    // Derive master key once — shared across all migration steps. Bound the
+    // KDF parameters before invoking Argon2 so a poisoned legacy vault cannot
+    // force unbounded memory/CPU consumption during migration.
     let kdf_params = parse_kdf_params(original_json)?;
-    let master_key = derive_key(passphrase, &kdf_params)?;
+    validate_kdf_params(&kdf_params)?;
+    let kdf_config = KdfConfig {
+        salt: kdf_params.salt.clone(),
+        time_cost: kdf_params.time_cost,
+        memory_cost: kdf_params.memory_cost,
+        parallelism: kdf_params.parallelism,
+    };
+    let master_key = derive_key(passphrase, &kdf_config)?;
 
     // Build the migration path: [original_version, ..., VAULT_VERSION]
     let migration_path: Vec<u32> = (probe.version..=VAULT_VERSION).collect();
@@ -687,18 +696,13 @@ fn find_backups(dir: &Path, stem: &str, ext: &str) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Extract KDF parameters from vault JSON (shared across all versions).
-fn parse_kdf_params(json: &str) -> Result<KdfConfig> {
+fn parse_kdf_params(json: &str) -> Result<super::format::KdfParams> {
     #[derive(serde::Deserialize)]
     struct KdfProbe {
         kdf: super::format::KdfParams,
     }
     let probe: KdfProbe = serde_json::from_str(json).context("Failed to parse KDF parameters")?;
-    Ok(KdfConfig {
-        salt: probe.kdf.salt,
-        time_cost: probe.kdf.time_cost,
-        memory_cost: probe.kdf.memory_cost,
-        parallelism: probe.kdf.parallelism,
-    })
+    Ok(probe.kdf)
 }
 
 #[cfg(test)]
@@ -1511,5 +1515,72 @@ mod tests {
                 i
             );
         }
+    }
+
+    /// Mutate a single field inside the `kdf` object of a vault JSON document.
+    fn mutate_v5_kdf_field(json: &str, field: &str, value: serde_json::Value) -> String {
+        let mut doc: serde_json::Value = serde_json::from_str(json).unwrap();
+        doc["kdf"][field] = value;
+        serde_json::to_string(&doc).unwrap()
+    }
+
+    #[test]
+    fn test_migration_rejects_oversized_kdf_memory_cost() {
+        let json = build_v5_vault_with_secret("test-passphrase");
+        // 256 MiB + 1 KiB exceeds MAX_MEMORY_COST_KIB.
+        let poisoned = mutate_v5_kdf_field(
+            &json,
+            "memory_cost",
+            serde_json::Value::from(256u32 * 1024 + 1),
+        );
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        fs::write(&vault_path, &poisoned).unwrap();
+
+        let err = upvault(&poisoned, "test-passphrase", vault_path.to_str().unwrap())
+            .expect_err("upvault must reject oversized memory_cost");
+        assert!(
+            err.to_string().contains("Invalid Argon2 memory cost"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_migration_rejects_oversized_kdf_time_cost() {
+        let json = build_v5_vault_with_secret("test-passphrase");
+        let poisoned = mutate_v5_kdf_field(&json, "time_cost", serde_json::Value::from(11u32));
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        fs::write(&vault_path, &poisoned).unwrap();
+
+        let err = upvault(&poisoned, "test-passphrase", vault_path.to_str().unwrap())
+            .expect_err("upvault must reject oversized time_cost");
+        assert!(
+            err.to_string().contains("Invalid Argon2 time cost"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_migration_rejects_undersized_kdf_salt() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let json = build_v5_vault_with_secret("test-passphrase");
+        // 8-byte salt is below MIN_SALT_LEN (16).
+        let short_salt = STANDARD.encode([0u8; 8]);
+        let poisoned = mutate_v5_kdf_field(&json, "salt", serde_json::Value::from(short_salt));
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        fs::write(&vault_path, &poisoned).unwrap();
+
+        let err = upvault(&poisoned, "test-passphrase", vault_path.to_str().unwrap())
+            .expect_err("upvault must reject undersized salt");
+        assert!(
+            err.to_string().contains("Invalid KDF salt length"),
+            "unexpected error: {err}"
+        );
     }
 }
