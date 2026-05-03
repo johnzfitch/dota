@@ -1583,4 +1583,39 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn test_migration_rejects_unsupported_kdf_algorithm() {
+        let json = build_v5_vault_with_secret("test-passphrase");
+        let poisoned = mutate_v5_kdf_field(&json, "algorithm", serde_json::Value::from("scrypt"));
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        fs::write(&vault_path, &poisoned).unwrap();
+
+        let err = upvault(&poisoned, "test-passphrase", vault_path.to_str().unwrap())
+            .expect_err("upvault must reject unsupported KDF algorithm");
+        assert!(
+            err.to_string().contains("Unsupported KDF algorithm"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_migration_rejects_oversized_kdf_parallelism() {
+        let json = build_v5_vault_with_secret("test-passphrase");
+        // 33 exceeds MAX_PARALLELISM (32).
+        let poisoned = mutate_v5_kdf_field(&json, "parallelism", serde_json::Value::from(33u32));
+
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.json");
+        fs::write(&vault_path, &poisoned).unwrap();
+
+        let err = upvault(&poisoned, "test-passphrase", vault_path.to_str().unwrap())
+            .expect_err("upvault must reject oversized parallelism");
+        assert!(
+            err.to_string().contains("Invalid Argon2 parallelism"),
+            "unexpected error: {err}"
+        );
+    }
 }
