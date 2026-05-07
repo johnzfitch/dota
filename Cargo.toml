@@ -60,4 +60,4 @@ opt-level = "z"      # Optimize for size
 lto = true           # Link-time optimization
 codegen-units = 1    # Better optimization
 strip = true         # Strip symbols
-panic = "abort"      # Smaller binary
+panic = "unwind"     # Preserve Drop-based zeroization on panic paths

@@ -970,7 +970,7 @@ mod tests {
             &vault.kdf,
             &vault.kem.public_key,
             &vault.x25519.public_key,
-        ));
+        ).unwrap());
         serde_json::to_string(&vault).unwrap()
     }
 
