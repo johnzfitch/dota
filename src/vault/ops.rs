@@ -1716,12 +1716,15 @@ mod tests {
             parallelism: vault.kdf.parallelism,
         };
         let master_key = derive_key("test-pass", &kdf_config).unwrap();
-        vault.key_commitment = Some(compute_v5_key_commitment(
-            &master_key,
-            &vault.kdf,
-            &vault.kem.public_key,
-            &vault.x25519.public_key,
-        ).unwrap());
+        vault.key_commitment = Some(
+            compute_v5_key_commitment(
+                &master_key,
+                &vault.kdf,
+                &vault.kem.public_key,
+                &vault.x25519.public_key,
+            )
+            .unwrap(),
+        );
         fs::write(vault_path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
 
         // Tamper: strip the key_commitment field from the vault file

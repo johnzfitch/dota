@@ -965,12 +965,15 @@ mod tests {
             migrated_from: None,
             min_version: V5_VAULT_VERSION,
         };
-        vault.key_commitment = Some(compute_v5_key_commitment(
-            &master_key,
-            &vault.kdf,
-            &vault.kem.public_key,
-            &vault.x25519.public_key,
-        ).unwrap());
+        vault.key_commitment = Some(
+            compute_v5_key_commitment(
+                &master_key,
+                &vault.kdf,
+                &vault.kem.public_key,
+                &vault.x25519.public_key,
+            )
+            .unwrap(),
+        );
         serde_json::to_string(&vault).unwrap()
     }
 
