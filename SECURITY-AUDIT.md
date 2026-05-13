@@ -30,16 +30,22 @@ _None identified in first pass._ The TC-HKEM v7 path validates the header HMAC u
 
 **Fix**: Pick one — either implement the clipboard path with `arboard` + a `tokio` timer to clear after N seconds, or update the README + remove the dead `arboard`/`ratatui`/`crossterm`/`tokio` dependencies. Removing dead deps also shrinks the supply-chain surface (H4).
 
-### H2 — `panic = "abort"` defeats `ZeroizeOnDrop` on every panic path; README claims otherwise
+### H2 — `panic = "abort"` defeated `ZeroizeOnDrop`; four `.expect` panic surfaces in commitment helpers — **addressed in this PR**
 
-- `Cargo.toml:63` sets `panic = "abort"` for the release profile.
+Original finding:
+
+- `Cargo.toml:63` set `panic = "abort"` for the release profile.
 - `README.md:67-68` states "Memory safety: Rust with `ZeroizeOnDrop` for all sensitive types — passphrases, shared secrets, and AES keys are wiped from memory on drop."
-- With `panic = "abort"`, the runtime calls `abort()` and **does not run destructors**. Any panic between secret creation and the natural end of scope leaves the bytes resident in pages the kernel later reclaims. The protective measures from `security::harden_process` (no core dumps, `mlockall`, `PR_SET_DUMPABLE = 0`) reduce but do not eliminate this gap (a process supervisor that snapshots `/proc/<pid>/mem` of a sibling process before the kernel zeroes pages is the realistic threat).
-- Actual panicking call sites in the runtime path: `vault/ops.rs:890,893` (`compute_v5_key_commitment` `.expect`s), `:931,960` (HMAC init `.expect`s). These are reachable only on impossible state (32-byte master key, HMAC accepting any key length), but they are panic surfaces.
+- With `panic = "abort"`, the runtime calls `abort()` and **does not run destructors**. Any panic between secret creation and the natural end of scope leaves the bytes resident in pages the kernel later reclaims. The protective measures from `security::harden_process` (no core dumps, `mlockall`, `PR_SET_DUMPABLE = 0`) reduce but do not eliminate this gap.
+- Actual panicking call sites in the runtime path: `vault/ops.rs:890,893` (`compute_v5_key_commitment` `.expect`s) and `:931,960` (HMAC init `.expect`s). Reachable only on impossible state (32-byte master key, HMAC accepting any key length), but still panic surfaces.
 
-**Impact**: README guarantee is overstated. Real risk is small (process exits immediately and the kernel reclaims pages on `_exit`), but the guarantee should match reality.
+**Resolution (in this PR, commits `ca00718` + `db57912`)**:
 
-**Fix**: Either (a) switch release profile to `panic = "unwind"` and accept the larger binary, then ensure no `unsafe` invariant breaks during unwinding; or (b) keep `panic = "abort"` and downgrade the README claim to "wiped on normal drop; abort/panic skips destructors but the process exits immediately and core dumps are disabled." Replace the four `.expect` calls with `.context()?` so they no longer reach `panic!` even if invariants change later.
+- `Cargo.toml:63` switched to `panic = "unwind"`. Destructors now run on panic paths, restoring the README guarantee.
+- Four `.expect` calls in `compute_v5_key_commitment`, `compute_v6_key_commitment`, and `compute_v7_key_commitment` replaced with `?`-propagating `Result` returns. The HKDF / HMAC errors are wrapped with `anyhow::Error::new(e).context(...)` so the underlying `hkdf::InvalidPrkLength` / `hmac::digest::InvalidLength` is preserved as a `source()` in the error chain.
+- `compute_v5_key_commitment` now returns `Result<Vec<u8>>`; callers were updated. `compute_key_commitment` dispatch arm for `0..=V5_VAULT_VERSION` removed the wrapping `Ok(...)` since the inner call already returns `Result`.
+
+**Residual risk**: `panic = "unwind"` increases binary size and means panics during `unsafe` blocks in `security.rs` could theoretically unwind through FFI boundaries. The four `unsafe` blocks in `security.rs` (`harden_linux`, `install_signal_handlers`, the signal handler itself) do not call any code that can panic, so this is safe in practice — but worth a regression test if more `unsafe` is added.
 
 ### H3 — Migration backups retain old key material indefinitely; never re-encrypted across passphrase change or rotation
 
