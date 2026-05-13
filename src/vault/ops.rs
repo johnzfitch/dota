@@ -887,11 +887,9 @@ pub(crate) fn compute_v5_key_commitment(
     info.extend_from_slice(x25519_pk);
 
     let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
-        .map_err(anyhow::Error::new)
         .context("failed to initialize v5 key commitment HKDF")?;
     let mut commitment = [0u8; 32];
     hk.expand(&info, &mut commitment)
-        .map_err(anyhow::Error::new)
         .context("failed to derive v5 key commitment bytes")?;
     Ok(commitment.to_vec())
 }
@@ -930,7 +928,6 @@ pub(crate) fn encode_v6_commitment_header(vault: &Vault) -> Result<Vec<u8>> {
 pub(crate) fn compute_v6_key_commitment(master_key: &MasterKey, vault: &Vault) -> Result<Vec<u8>> {
     let header = encode_v6_commitment_header(vault)?;
     let mut mac = HmacSha256::new_from_slice(master_key.as_bytes())
-        .map_err(anyhow::Error::new)
         .context("failed to initialize v6 key commitment HMAC")?;
     mac.update(&header);
     Ok(mac.finalize().into_bytes().to_vec())
@@ -960,7 +957,6 @@ pub(crate) fn encode_v7_commitment_header(vault: &Vault) -> Result<Vec<u8>> {
 pub(crate) fn compute_v7_key_commitment(master_key: &MasterKey, vault: &Vault) -> Result<Vec<u8>> {
     let header = encode_v7_commitment_header(vault)?;
     let mut mac = HmacSha256::new_from_slice(master_key.as_bytes())
-        .map_err(anyhow::Error::new)
         .context("failed to initialize v7 key commitment HMAC")?;
     mac.update(&header);
     Ok(mac.finalize().into_bytes().to_vec())
