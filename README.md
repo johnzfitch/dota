@@ -65,7 +65,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
   <dd>Master key <code>mk</code> is bound into every per-secret key derivation via &tau;&nbsp;=&nbsp;HMAC(<code>mk</code>,&nbsp;<code>ct_kem&nbsp;‖&nbsp;eph_pk</code>). Knowledge of the KEM private keys alone is insufficient.</dd>
 
   <dt>Memory safety</dt>
-  <dd>Rust with <code>ZeroizeOnDrop</code> for all sensitive types — passphrases, shared secrets, and AES keys are wiped from memory on drop.</dd>
+  <dd>Rust with <code>ZeroizeOnDrop</code> on all sensitive types — passphrases, shared secrets, and AES keys are wiped when their wrappers drop on the normal return path. The release profile uses <code>panic = "abort"</code> for fail-fast behavior, so drop glue does <em>not</em> run on panic; <code>harden_process</code> compensates by disabling core dumps (<code>RLIMIT_CORE = 0</code>), blocking ptrace (<code>PR_SET_DUMPABLE = 0</code>), and pinning all pages with <code>mlockall</code> so freed pages cannot be observed by a same-UID process or written to swap, and the Linux page allocator zeros pages before handing them to the next process.</dd>
 
   <dt>Authenticated metadata</dt>
   <dd><code>version</code>, <code>min_version</code>, algorithm IDs, public keys, and <code>suite</code> are covered by the <code>v7</code> HMAC-SHA256 key commitment before any private-key decryption.</dd>

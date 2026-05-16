@@ -60,4 +60,4 @@ opt-level = "z"      # Optimize for size
 lto = true           # Link-time optimization
 codegen-units = 1    # Better optimization
 strip = true         # Strip symbols
-panic = "unwind"     # Preserve Drop-based zeroization on panic paths
+panic = "abort"      # Fail-fast on panic. harden_process (mlockall + PR_SET_DUMPABLE=0 + RLIMIT_CORE=0) and the Linux page allocator (zero-on-reallocation) already prevent secret recovery from freed pages under our threat model; running drop glue during unwind would also make extern "C" fn signal_handler panic-freedom a load-bearing invariant.

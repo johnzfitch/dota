@@ -30,22 +30,28 @@ _None identified in first pass._ The TC-HKEM v7 path validates the header HMAC u
 
 **Fix**: Pick one — either implement the clipboard path with `arboard` + a `tokio` timer to clear after N seconds, or update the README + remove the dead `arboard`/`ratatui`/`crossterm`/`tokio` dependencies. Removing dead deps also shrinks the supply-chain surface (H4).
 
-### H2 — `panic = "abort"` defeated `ZeroizeOnDrop`; four `.expect` panic surfaces in commitment helpers — **addressed in this PR**
+### H2 — `panic = "abort"` defeats `ZeroizeOnDrop` literally; four `.expect` panic surfaces in commitment helpers — **partially resolved in this PR; revised severity**
 
-Original finding:
+**Reconsidered severity**: This finding's "High" rating was overstated. The README's literal phrasing ("wiped from memory on drop") does not match the runtime behavior under `panic = "abort"`, but the *security posture* it intended to describe is preserved by `harden_process`:
 
-- `Cargo.toml:63` set `panic = "abort"` for the release profile.
-- `README.md:67-68` states "Memory safety: Rust with `ZeroizeOnDrop` for all sensitive types — passphrases, shared secrets, and AES keys are wiped from memory on drop."
-- With `panic = "abort"`, the runtime calls `abort()` and **does not run destructors**. Any panic between secret creation and the natural end of scope leaves the bytes resident in pages the kernel later reclaims. The protective measures from `security::harden_process` (no core dumps, `mlockall`, `PR_SET_DUMPABLE = 0`) reduce but do not eliminate this gap.
-- Actual panicking call sites in the runtime path: `vault/ops.rs:890,893` (`compute_v5_key_commitment` `.expect`s) and `:931,960` (HMAC init `.expect`s). Reachable only on impossible state (32-byte master key, HMAC accepting any key length), but still panic surfaces.
+| Attacker | Already blocked by `harden_process` |
+| --- | --- |
+| Same-UID process reading `/proc/<pid>/mem` | ✅ `PR_SET_DUMPABLE = 0` |
+| Same-UID process attaching via `ptrace` | ✅ `PR_SET_DUMPABLE = 0` |
+| Core dump on disk | ✅ `RLIMIT_CORE = 0` |
+| Pages swapped to disk | ✅ `mlockall(MCL_CURRENT \| MCL_FUTURE)` |
+| Next process that allocates the freed page | ✅ Linux page allocator zeros pages before handing them out |
+| Kernel-level attacker reading freed pages | ❌ Explicitly out of threat model (README: "does not protect against compromised endpoints") |
 
-**Resolution (in this PR, commits `ca00718` + `db57912`)**:
+So `panic = "abort"` was not actually a security defect under the documented threat model; it was a README-precision defect.
 
-- `Cargo.toml:63` switched to `panic = "unwind"`. Destructors now run on panic paths, restoring the README guarantee.
-- Four `.expect` calls in `compute_v5_key_commitment`, `compute_v6_key_commitment`, and `compute_v7_key_commitment` replaced with `?`-propagating `Result` returns. The HKDF / HMAC errors are wrapped with `anyhow::Error::new(e).context(...)` so the underlying `hkdf::InvalidPrkLength` / `hmac::digest::InvalidLength` is preserved as a `source()` in the error chain.
-- `compute_v5_key_commitment` now returns `Result<Vec<u8>>`; callers were updated. `compute_key_commitment` dispatch arm for `0..=V5_VAULT_VERSION` removed the wrapping `Ok(...)` since the inner call already returns `Result`.
+**Resolution in this PR**:
 
-**Residual risk**: `panic = "unwind"` increases binary size and means panics during `unsafe` blocks in `security.rs` could theoretically unwind through FFI boundaries. The four `unsafe` blocks in `security.rs` (`harden_linux`, `install_signal_handlers`, the signal handler itself) do not call any code that can panic, so this is safe in practice — but worth a regression test if more `unsafe` is added.
+- **`Cargo.toml`** — kept at `panic = "abort"` (initial flip to `"unwind"` in `ca00718` reverted in commit X). Rationale: `panic = "unwind"` adds ~10–20% binary size, runs drop glue on panic paths (slightly more state-mutation surface for a *post-panic* process), and makes "extern \"C\" fn signal_handler must be panic-free" a load-bearing invariant. None of those costs buys actual security in the documented threat model.
+- **README** — sentence in "Memory safety" rewritten to be explicit: drops run on the normal return path, `harden_process` covers the panic path. No more imprecise claim.
+- **`.expect` panic surfaces removed** — `compute_v5/v6/v7_key_commitment` now return `Result<Vec<u8>>` and propagate the underlying `hkdf::InvalidPrkLength` / `hmac::digest::InvalidLength` display string via `anyhow!`. These code paths were unreachable in practice (32-byte master_key, HMAC accepts any key length), but eliminating panics from security-critical helpers is unambiguously good regardless of panic strategy.
+
+**Residual gap**: None. Documentation matches reality. Helpers no longer panic.
 
 ### H3 — Migration backups retain old key material indefinitely; never re-encrypted across passphrase change or rotation
 
@@ -169,6 +175,16 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Route migration progress through a dedicated logger (or `eprint`-only when stderr is a tty), and never include attacker-controlled fields in the format string. The current code already only prints version numbers (u32), so it is safe today.
 
+### M10 — Secret-name validation happens *after* legacy migration completes; the "no name in migration log" invariant is unmarked
+
+- `validate_secret_name` (`vault/ops.rs:1052`) runs inside `validate_v7_vault` (`:1221`), which is called by `unlock_v7` *after* the migration chain produces a v7 `Vault` struct.
+- During the v1→…→v6→v7 step functions in `migration.rs`, attacker-controlled names from a poisoned vault file flow through `HashMap` inserts unvalidated.
+- Today this is safe because migration step functions never `eprintln!` a secret name — only paths and version numbers. But that property is undocumented and load-bearing.
+
+**Impact**: Today, none. Future regression risk: if any migration step adds `eprintln!("Migrating secret '{}'...", name)` or similar, the bidi-override / terminal-escape attack returns through the migration path, where it bypasses the post-migration `validate_v7_vault` gate.
+
+**Fix**: Add a `// SECURITY:` comment near each `eprintln!` / `println!` in `migration.rs` calling out that secret names from the in-flight legacy vault MUST NOT appear in any format string until `validate_v7_vault` has run. Alternatively, run `validate_secret_name` at the start of each migration step on the inbound names so the invariant is structural rather than documentary.
+
 ## Low
 
 ### L1 — Misleading variable name in X25519 zero-check
@@ -202,6 +218,14 @@ If the team wants to fix this rather than document it, the format change is larg
 ### L6 — `ratatui = "0.30"` is a higher version than upstream's published latest (`0.28.x` at audit time); double-check the version exists or this is a typo
 
 **Fix**: Verify against `crates.io`. If it does not exist, the build is currently broken on a fresh checkout — but H1 says we should be removing this dep anyway.
+
+### L7 — `validate_kdf_params` migration tests don't cover `algorithm` and `parallelism` branches (carried over from PR #15 Copilot review)
+
+- PR #15 added regression tests for `memory_cost`, `time_cost`, and salt-length rejection on the legacy migration path, but skipped the `algorithm != "argon2id"` and `parallelism` out-of-range arms.
+- Production code (`vault/ops.rs:1091-1137`) checks all four. The gap is purely in test coverage.
+- Copilot's review comment on the PR is still open at merge time.
+
+**Fix**: Add two tests in `vault/migration.rs`: (a) a legacy vault with `kdf.algorithm = "argon2d"` should fail at the validation step; (b) a legacy vault with `parallelism = 100` should fail similarly. Same shape as the existing `memory_cost` / `time_cost` rejection tests.
 
 ---
 
