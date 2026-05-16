@@ -299,7 +299,7 @@ pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) ->
             &vault.kdf,
             &vault.kem.public_key,
             &vault.x25519.public_key,
-        );
+        )?;
         if !security::constant_time_eq(stored_commitment, &expected) {
             anyhow::bail!(
                 "Key commitment mismatch — vault may have been tampered with \
@@ -875,7 +875,7 @@ pub(crate) fn compute_v5_key_commitment(
     kdf: &KdfParams,
     mlkem_pk: &[u8],
     x25519_pk: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut info = Vec::new();
     info.extend_from_slice(KEY_COMMITMENT_LABEL_V5);
     info.extend_from_slice(kdf.algorithm.as_bytes());
@@ -886,12 +886,17 @@ pub(crate) fn compute_v5_key_commitment(
     info.extend_from_slice(mlkem_pk);
     info.extend_from_slice(x25519_pk);
 
+    // hkdf 0.12 does not enable its `std` feature by default, so
+    // `InvalidPrkLength` / `InvalidLength` do not implement `std::error::Error`
+    // and cannot flow through `anyhow::Context`. Format the underlying error's
+    // `Display` into the anyhow message instead — same pattern as
+    // `derive_wrapping_keys_with_labels`.
     let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
-        .expect("master key is 32 bytes, valid HKDF PRK");
+        .map_err(|e| anyhow::anyhow!("failed to initialize v5 key commitment HKDF: {}", e))?;
     let mut commitment = [0u8; 32];
     hk.expand(&info, &mut commitment)
-        .expect("32-byte expand always succeeds");
-    commitment.to_vec()
+        .map_err(|e| anyhow::anyhow!("failed to derive v5 key commitment bytes: {}", e))?;
+    Ok(commitment.to_vec())
 }
 
 fn append_u32_be(buf: &mut Vec<u8>, value: u32) {
@@ -928,7 +933,7 @@ pub(crate) fn encode_v6_commitment_header(vault: &Vault) -> Result<Vec<u8>> {
 pub(crate) fn compute_v6_key_commitment(master_key: &MasterKey, vault: &Vault) -> Result<Vec<u8>> {
     let header = encode_v6_commitment_header(vault)?;
     let mut mac = HmacSha256::new_from_slice(master_key.as_bytes())
-        .expect("HMAC accepts arbitrary key lengths");
+        .map_err(|e| anyhow::anyhow!("failed to initialize v6 key commitment HMAC: {}", e))?;
     mac.update(&header);
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -957,7 +962,7 @@ pub(crate) fn encode_v7_commitment_header(vault: &Vault) -> Result<Vec<u8>> {
 pub(crate) fn compute_v7_key_commitment(master_key: &MasterKey, vault: &Vault) -> Result<Vec<u8>> {
     let header = encode_v7_commitment_header(vault)?;
     let mut mac = HmacSha256::new_from_slice(master_key.as_bytes())
-        .expect("HMAC accepts arbitrary key lengths");
+        .map_err(|e| anyhow::anyhow!("failed to initialize v7 key commitment HMAC: {}", e))?;
     mac.update(&header);
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -983,12 +988,12 @@ fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()>
 /// Compute the version-appropriate key commitment for a vault.
 pub(crate) fn compute_key_commitment(master_key: &MasterKey, vault: &Vault) -> Result<Vec<u8>> {
     match vault.version {
-        0..=V5_VAULT_VERSION => Ok(compute_v5_key_commitment(
+        0..=V5_VAULT_VERSION => compute_v5_key_commitment(
             master_key,
             &vault.kdf,
             &vault.kem.public_key,
             &vault.x25519.public_key,
-        )),
+        ),
         V6_VAULT_VERSION => compute_v6_key_commitment(master_key, vault),
         V7_VAULT_VERSION => compute_v7_key_commitment(master_key, vault),
         version => anyhow::bail!(
@@ -1368,7 +1373,7 @@ mod tests {
         let mlkem_pk = vec![0x21; 1184];
         let x25519_pk = vec![0x31; 32];
 
-        let computed = compute_v5_key_commitment(&master_key, &kdf, &mlkem_pk, &x25519_pk);
+        let computed = compute_v5_key_commitment(&master_key, &kdf, &mlkem_pk, &x25519_pk).unwrap();
 
         let mut info = Vec::new();
         info.extend_from_slice(KEY_COMMITMENT_LABEL_V5);
@@ -1423,7 +1428,8 @@ mod tests {
             &v6_vault.kdf,
             &v6_vault.kem.public_key,
             &v6_vault.x25519.public_key,
-        );
+        )
+        .unwrap();
 
         assert_eq!(dispatched, v6);
         assert_ne!(dispatched, legacy);
@@ -1715,12 +1721,15 @@ mod tests {
             parallelism: vault.kdf.parallelism,
         };
         let master_key = derive_key("test-pass", &kdf_config).unwrap();
-        vault.key_commitment = Some(compute_v5_key_commitment(
-            &master_key,
-            &vault.kdf,
-            &vault.kem.public_key,
-            &vault.x25519.public_key,
-        ));
+        vault.key_commitment = Some(
+            compute_v5_key_commitment(
+                &master_key,
+                &vault.kdf,
+                &vault.kem.public_key,
+                &vault.x25519.public_key,
+            )
+            .unwrap(),
+        );
         fs::write(vault_path, serde_json::to_string_pretty(&vault).unwrap()).unwrap();
 
         // Tamper: strip the key_commitment field from the vault file
