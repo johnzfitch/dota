@@ -794,20 +794,36 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
     let mut perms = fs::metadata(parent)
         .context("Failed to inspect vault directory permissions")?
         .permissions();
+    let current_mode = perms.mode() & 0o7777;
     perms.set_mode(0o700);
 
     match fs::set_permissions(parent, perms) {
         Ok(()) => Ok(()),
         Err(err) if parent_existed && is_nonfatal_directory_permission_error(&err) => {
-            // M8: degrade-to-warning is acceptable ONLY for the default
-            // `~/.dota/` directory (or its test-suite equivalent under
-            // `tempdir`). For a user-supplied `--vault PATH` whose parent
-            // is not the default, refuse to proceed — the operator asked
-            // us to put a secrets file there and we cannot honor 0o700.
-            if is_default_vault_parent(parent) {
+            // M8: an existing-directory chmod failure is only safe-to-warn
+            // if the directory is already at least as restrictive as 0o700.
+            // For:
+            //   * the default `~/.dota/` (which create_vault_directory
+            //     would have made 0o700 from inception),
+            //   * a system-managed sticky-bit tempdir (e.g. /tmp under
+            //     uid != 0), where world-rwx is the documented contract
+            //     and chmod is denied to non-owners,
+            //   * any other dir the operator owns at 0o700 already,
+            // we accept the existing mode rather than break the call.
+            //
+            // For a non-default parent that is laxer than 0o700 AND we
+            // cannot tighten it (e.g. /var/secrets at 0o755 with chmod
+            // denied), we refuse — the operator asked us to drop a vault
+            // there and we cannot enforce the policy this directory
+            // would need.
+            let already_strict = (current_mode & 0o077) == 0;
+            let sticky_world = current_mode & libc::S_ISVTX != 0 && (current_mode & 0o007) == 0o007;
+            if is_default_vault_parent(parent) || already_strict || sticky_world {
                 eprintln!(
-                    "Warning: unable to tighten existing vault directory permissions for {}: {}",
+                    "Warning: vault directory {} retains mode 0o{:o} (chmod 0o700 failed: {}). \
+                     The vault file itself is mode 0o600.",
                     parent.display(),
+                    current_mode,
                     err
                 );
                 Ok(())
@@ -815,8 +831,9 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
                 Err(err).with_context(|| {
                     format!(
                         "Refusing to write vault into a directory whose 0o700 permissions \
-                         cannot be enforced: {}. Choose a directory you control, or \
-                         pre-create it with mode 0700.",
+                         cannot be enforced (current mode 0o{:o}): {}. Choose a directory \
+                         you control, or pre-create it with mode 0700.",
+                        current_mode,
                         parent.display()
                     )
                 })
@@ -832,9 +849,6 @@ fn is_default_vault_parent(parent: &Path) -> bool {
         Some(home) => home.join(".dota"),
         None => return false,
     };
-    // Compare canonicalized paths when both exist; fall back to a literal
-    // OsStr equality otherwise. This keeps the test suite (which uses
-    // tempdir, never `~/.dota/`) on the strict branch.
     match (fs::canonicalize(parent), fs::canonicalize(&default_parent)) {
         (Ok(a), Ok(b)) => a == b,
         _ => parent == default_parent.as_path(),
