@@ -11,6 +11,7 @@
 pub mod aes_gcm;
 pub mod hybrid;
 pub mod kdf;
+#[cfg(feature = "legacy-migration")]
 pub mod legacy_kyber;
 pub mod mlkem;
 pub mod x25519;

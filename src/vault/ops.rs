@@ -42,14 +42,21 @@ const AES_GCM_TAG_LEN: usize = 16;
 const WRAPPED_MLKEM_PRIVATE_KEY_LEN: usize = 2400 + AES_GCM_TAG_LEN;
 const WRAPPED_X25519_PRIVATE_KEY_LEN: usize = 32 + AES_GCM_TAG_LEN;
 
-/// Default vault file path
+/// Default vault file path.
+///
+/// L2: returns `String` for compatibility with the existing CLI surface,
+/// but routes through `into_os_string().into_string()` so that a non-UTF-8
+/// home directory surfaces a panic at startup rather than silent
+/// substitution via `to_string_lossy`. On every realistic platform (Linux,
+/// macOS, Windows under default locales) the path is UTF-8.
 pub fn default_vault_path() -> String {
-    dirs::home_dir()
+    let path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".dota")
-        .join("vault.json")
-        .to_string_lossy()
-        .to_string()
+        .join("vault.json");
+    path.into_os_string()
+        .into_string()
+        .unwrap_or_else(|os| panic!("vault path is not valid UTF-8: {:?}", os))
 }
 
 /// Unlocked vault with decrypted keypairs
@@ -256,10 +263,17 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
             version
         ),
         version if version < VAULT_VERSION => {
-            eprintln!(
-                "Migrating vault from v{} to v{}...",
-                probe.version, VAULT_VERSION
-            );
+            // M9: gate diagnostic on stderr being a tty so a downstream
+            // pipe consumer (e.g. `dota get TOK | ssh-agent`) doesn't see
+            // the migration banner. Only u32 versions enter the format
+            // string — no attacker-controlled fields.
+            use std::io::IsTerminal;
+            if std::io::stderr().is_terminal() {
+                eprintln!(
+                    "Migrating vault from v{} to v{}...",
+                    probe.version, VAULT_VERSION
+                );
+            }
             let vault = super::migration::upvault(&json, passphrase, vault_path)?;
             unlock_v7(vault, passphrase, vault_path)
         }
@@ -292,6 +306,7 @@ fn derive_master_key(passphrase: &str, vault: &Vault) -> Result<MasterKey> {
     derive_key(passphrase, &kdf_config)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     if let Some(ref stored_commitment) = vault.key_commitment {
         let expected = compute_v5_key_commitment(
@@ -500,6 +515,19 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
 
     save_vault(unlocked)?;
 
+    // H3: migration backups encrypted under the OLD passphrase are now
+    // strictly worse than useless. Scrub them into hollowed-shell
+    // tombstones so a future compromise of the old passphrase cannot
+    // resurrect any key material. Tombstone hygiene is cleanup — log on
+    // failure but do not roll back the (already persisted) passphrase
+    // change.
+    if let Err(e) = super::migration::convert_backups_to_tombstone(&unlocked.path) {
+        eprintln!(
+            "Warning: failed to convert migration backups to tombstones: {}",
+            e
+        );
+    }
+
     Ok(())
 }
 
@@ -596,6 +624,17 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     // SecretString is zeroized via ZeroizeOnDrop.
 
     save_vault(unlocked)?;
+
+    // H3: same hygiene as change_passphrase — scrub any pre-rotation
+    // migration backups into tombstones now that the live vault carries
+    // fresh key material.
+    if let Err(e) = super::migration::convert_backups_to_tombstone(&unlocked.path) {
+        eprintln!(
+            "Warning: failed to convert migration backups to tombstones: {}",
+            e
+        );
+    }
+
     Ok(())
 }
 
@@ -760,17 +799,45 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
     match fs::set_permissions(parent, perms) {
         Ok(()) => Ok(()),
         Err(err) if parent_existed && is_nonfatal_directory_permission_error(&err) => {
-            // Existing directories may live under temp/system-managed paths that
-            // reject chmod. Keep file hardening strict, but do not fail when we
-            // cannot redefine policy for a directory we did not create.
-            eprintln!(
-                "Warning: unable to tighten existing vault directory permissions for {}: {}",
-                parent.display(),
-                err
-            );
-            Ok(())
+            // M8: degrade-to-warning is acceptable ONLY for the default
+            // `~/.dota/` directory (or its test-suite equivalent under
+            // `tempdir`). For a user-supplied `--vault PATH` whose parent
+            // is not the default, refuse to proceed — the operator asked
+            // us to put a secrets file there and we cannot honor 0o700.
+            if is_default_vault_parent(parent) {
+                eprintln!(
+                    "Warning: unable to tighten existing vault directory permissions for {}: {}",
+                    parent.display(),
+                    err
+                );
+                Ok(())
+            } else {
+                Err(err).with_context(|| {
+                    format!(
+                        "Refusing to write vault into a directory whose 0o700 permissions \
+                         cannot be enforced: {}. Choose a directory you control, or \
+                         pre-create it with mode 0700.",
+                        parent.display()
+                    )
+                })
+            }
         }
         Err(err) => Err(err).context("Failed to secure vault directory"),
+    }
+}
+
+#[cfg(unix)]
+fn is_default_vault_parent(parent: &Path) -> bool {
+    let default_parent = match dirs::home_dir() {
+        Some(home) => home.join(".dota"),
+        None => return false,
+    };
+    // Compare canonicalized paths when both exist; fall back to a literal
+    // OsStr equality otherwise. This keeps the test suite (which uses
+    // tempdir, never `~/.dota/`) on the strict branch.
+    match (fs::canonicalize(parent), fs::canonicalize(&default_parent)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => parent == default_parent.as_path(),
     }
 }
 
@@ -827,10 +894,12 @@ fn derive_wrapping_keys_with_labels(
     Ok(keys)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     derive_wrapping_keys_v5(mk)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn derive_wrapping_keys_v5(mk: &MasterKey) -> Result<WrappingKeys> {
     derive_wrapping_keys_with_labels(mk, WRAP_LABEL_MLKEM_V5, WRAP_LABEL_X25519_V5)
 }
@@ -1700,6 +1769,7 @@ mod tests {
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
     }
 
+    #[cfg(feature = "legacy-migration")]
     #[test]
     fn test_v5_vault_rejects_stripped_key_commitment() {
         let tmp = NamedTempFile::new().unwrap();

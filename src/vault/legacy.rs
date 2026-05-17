@@ -34,6 +34,7 @@ pub struct VaultV1 {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct EncryptedSecretV1 {
     #[serde(with = "super::format::base64_serde")]
     pub x25519_ephemeral_public: Vec<u8>,

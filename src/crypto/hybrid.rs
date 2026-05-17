@@ -7,9 +7,10 @@
 //! classical security. Conversely, X25519 protects against harvest-now-decrypt-later
 //! attacks by quantum computers.
 
+#[cfg(feature = "legacy-migration")]
+use super::legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPublicKey};
 use super::{
     aes_gcm::AesKey,
-    legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPublicKey},
     mlkem::{self, MlKemCiphertext, MlKemPublicKey},
     x25519::{self, X25519PublicKey},
 };
@@ -20,8 +21,10 @@ use sha2::Sha256;
 use zeroize::Zeroize;
 
 /// Legacy hybrid HKDF context for v2-v5 vaults.
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 const LEGACY_HKDF_CONTEXT: &[u8] = b"dota-v2-secret";
 /// Legacy hybrid HKDF salt for v2-v5 vaults.
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 const LEGACY_HKDF_SALT: &[u8] = b"dota-v2-hkdf-salt";
 /// v6 hybrid HKDF context.
 const V6_HKDF_CONTEXT: &[u8] = b"dota-v6-secret";
@@ -77,6 +80,7 @@ pub fn hybrid_encapsulate_v6(
 }
 
 /// Perform legacy hybrid encapsulation: Kyber768 + X25519 → AES key.
+#[cfg(feature = "legacy-migration")]
 pub fn hybrid_encapsulate_legacy(
     mlkem_public: &LegacyKyberPublicKey,
     x25519_public: &X25519PublicKey,
@@ -238,23 +242,28 @@ fn combine_shared_secrets_v7(
     offset += x25519_eph_pk.len();
     ikm[offset..offset + 32].copy_from_slice(&tau);
 
-    // 3. HKDF-Extract + Expand → 256-bit AES key
+    // 3. HKDF-Extract + Expand → 256-bit AES key.
+    //
+    // okm is held in Zeroizing so an early `result?` on a hypothetical
+    // expand failure still wipes the buffer on the way out — `expand(32)`
+    // cannot fail today (HKDF-SHA256 supports up to 8160-byte output) but
+    // the unreachability is a function of the requested length, not a
+    // safety property we want to load-bear.
     let hk = Hkdf::<Sha256>::new(Some(V7_HKDF_SALT), &ikm);
-    let mut okm = [0u8; 32];
+    let mut okm = zeroize::Zeroizing::new([0u8; 32]);
     let result = hk
-        .expand(V7_HKDF_CONTEXT, &mut okm)
+        .expand(V7_HKDF_CONTEXT, okm.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expansion failed: {}", e));
 
-    // 4. Zeroize all intermediates
+    // 4. Zeroize IKM containing both shared secrets before returning.
+    //    okm is zeroized by its `Zeroizing` wrapper on every exit path.
     ikm.zeroize();
     result?;
-    let key = AesKey::from_bytes(okm);
-    okm.zeroize();
-    std::hint::black_box(&okm);
-    Ok(key)
+    Ok(AesKey::from_bytes(*okm))
 }
 
 /// Perform legacy hybrid decapsulation: Kyber768 + X25519 → AES key.
+#[cfg(feature = "legacy-migration")]
 pub fn hybrid_decapsulate_legacy(
     mlkem_private: &super::legacy_kyber::LegacyKyberPrivateKey,
     x25519_private: &super::x25519::X25519PrivateKey,
@@ -283,22 +292,19 @@ fn combine_shared_secrets_with_labels(
     ikm[..32].copy_from_slice(kem_ss);
     ikm[32..].copy_from_slice(x25519_ss);
 
-    // HKDF-Extract and HKDF-Expand to derive 256-bit AES key
+    // HKDF-Extract and HKDF-Expand to derive 256-bit AES key.
+    // okm wrapped in Zeroizing so an early `result?` still wipes on exit.
     let hk = Hkdf::<Sha256>::new(Some(hkdf_salt), &ikm);
-    let mut okm = [0u8; 32];
+    let mut okm = zeroize::Zeroizing::new([0u8; 32]);
     let result = hk
-        .expand(hkdf_context, &mut okm)
+        .expand(hkdf_context, okm.as_mut())
         .map_err(|e| anyhow::anyhow!("HKDF expansion failed: {}", e));
 
     // Zeroize IKM containing both shared secrets before returning
     ikm.zeroize();
 
     result?;
-    let key = AesKey::from_bytes(okm);
-    // Zeroize the stack buffer — data now lives inside AesKey (ZeroizeOnDrop)
-    okm.zeroize();
-    std::hint::black_box(&okm);
-    Ok(key)
+    Ok(AesKey::from_bytes(*okm))
 }
 
 #[cfg(test)]
@@ -380,6 +386,7 @@ mod tests {
         assert_ne!(encap.derived_key.as_bytes(), decap_key.as_bytes());
     }
 
+    #[cfg(feature = "legacy-migration")]
     #[test]
     fn test_legacy_hybrid_round_trip() {
         let (mlkem_pk, mlkem_sk) = legacy_kyber::generate_keypair().unwrap();

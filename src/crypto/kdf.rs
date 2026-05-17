@@ -4,7 +4,8 @@
 //! hardened parameters: t=3, m=65536 KiB (64 MiB), p=4
 
 use anyhow::Result;
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
+use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -45,12 +46,15 @@ impl Default for KdfConfig {
     }
 }
 
-/// Generate a random salt for KDF
+/// Generate a random salt for KDF.
+///
+/// M6: 32 bytes from OsRng — above the 16-byte legacy floor accepted by
+/// `validate_kdf_params`, and at the RFC 9106 archival recommendation.
+/// Skips the SaltString base64 round-trip; we encode at vault-write time.
 pub fn generate_salt() -> Vec<u8> {
-    SaltString::generate(&mut OsRng)
-        .as_str()
-        .as_bytes()
-        .to_vec()
+    let mut salt = vec![0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    salt
 }
 
 /// Derive master key from passphrase using Argon2id

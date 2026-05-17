@@ -3,7 +3,7 @@
 ![Dota post quantum secure local vault](dotav7-paper/IMG_6689_Afterlight.jpeg)
 </p>
 
-Post-quantum secure secrets manager with `v7` <abbr title="Triple-Committed Hybrid Key Encapsulation Mechanism">TC-HKEM</abbr> vaults (<abbr title="Module Lattice-based Key Encapsulation Mechanism, 768-bit security level, NIST FIPS 203">ML-KEM-768</abbr> + X25519 with ciphertext binding and passphrase commitment), plus a terminal UI.
+Post-quantum secure secrets manager with `v7` <abbr title="Triple-Committed Hybrid Key Encapsulation Mechanism">TC-HKEM</abbr> vaults (<abbr title="Module Lattice-based Key Encapsulation Mechanism, 768-bit security level, NIST FIPS 203">ML-KEM-768</abbr> + X25519 with ciphertext binding and passphrase commitment), plus an OS clipboard auto-clear mode and a text-mode interactive shell.
 
 **Defense-in-depth cryptography**: `v7` vaults protect secrets with both classical security (X25519) and post-quantum security (ML-KEM-768), combined via the TC-HKEM (Triple-Committed Hybrid KEM) construction. Security holds if *either* algorithm is secure. Legacy `v1`&ndash;`v6` vaults are migrated in place to `v7` on unlock.
 
@@ -16,12 +16,13 @@ cargo install --path .
 # Initialize vault (stored at ~/.dota/vault.json by default)
 dota init
 
-# Launch TUI (default command)
+# Launch interactive text shell (default command)
 dota
 
 # Or use CLI commands
-dota set API_KEY "secret-value"
-dota get API_KEY
+dota set API_KEY               # value read from stdin or non-echoing prompt
+dota get API_KEY               # prints value to stdout
+dota get API_KEY --copy        # copies to OS clipboard, auto-clears after 30s
 dota list
 ```
 
@@ -65,7 +66,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
   <dd>Master key <code>mk</code> is bound into every per-secret key derivation via &tau;&nbsp;=&nbsp;HMAC(<code>mk</code>,&nbsp;<code>ct_kem&nbsp;‖&nbsp;eph_pk</code>). Knowledge of the KEM private keys alone is insufficient.</dd>
 
   <dt>Memory safety</dt>
-  <dd>Rust with <code>ZeroizeOnDrop</code> on all sensitive types — passphrases, shared secrets, and AES keys are wiped when their wrappers drop on the normal return path. The release profile uses <code>panic = "abort"</code> for fail-fast behavior, so drop glue does <em>not</em> run on panic; <code>harden_process</code> compensates by disabling core dumps (<code>RLIMIT_CORE = 0</code>), blocking ptrace (<code>PR_SET_DUMPABLE = 0</code>), and pinning all pages with <code>mlockall</code> so freed pages cannot be observed by a same-UID process or written to swap, and the Linux page allocator zeros pages before handing them to the next process.</dd>
+  <dd>Rust with <code>ZeroizeOnDrop</code> on all sensitive types — passphrases, shared secrets, and AES keys are wiped when their wrappers drop on the normal return path. The release profile uses <code>panic = "abort"</code> for fail-fast behavior, so drop glue does <em>not</em> run on panic; on Linux, <code>harden_process</code> compensates by disabling core dumps (<code>RLIMIT_CORE = 0</code>), blocking ptrace (<code>PR_SET_DUMPABLE = 0</code>), and pinning all pages with <code>mlockall</code> so freed pages cannot be observed by a same-UID process or written to swap, and the Linux page allocator zeros pages before handing them to the next process. <strong>macOS and Windows</strong> run with OS defaults only — <code>harden_process</code> is a no-op on those platforms; rely on Secure Enclave / DPAPI and full-disk encryption.</dd>
 
   <dt>Authenticated metadata</dt>
   <dd><code>version</code>, <code>min_version</code>, algorithm IDs, public keys, and <code>suite</code> are covered by the <code>v7</code> HMAC-SHA256 key commitment before any private-key decryption.</dd>
@@ -79,8 +80,11 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
   <dt>Export to environment</dt>
   <dd><kbd>dota export-env VAR1 VAR2</kbd> outputs shell-compatible variable assignments for CI/CD pipelines.</dd>
 
-  <dt>TUI and CLI</dt>
-  <dd>Interactive <a href="https://github.com/ratatui/ratatui">ratatui</a> terminal interface or scriptable command-line operations.</dd>
+  <dt>Interactive shell and CLI</dt>
+  <dd>Text-mode interactive shell (<kbd>dota</kbd> / <kbd>dota unlock</kbd>) for browsing and editing secrets, plus scriptable command-line operations for CI/CD.</dd>
+
+  <dt>Clipboard auto-clear</dt>
+  <dd><kbd>dota get NAME --copy</kbd> writes the secret to the OS clipboard and clears it after a timeout (default 30s, override with <code>DOTA_CLIPBOARD_TIMEOUT_SECS</code>). Keeps secrets out of terminal scrollback and shell history.</dd>
 </dl>
 
 ## Design constraints
@@ -107,6 +111,22 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
   <dt>Side channels</dt>
   <dd>No explicit protection against timing or cache attacks beyond what the underlying cryptography libraries provide.</dd>
+
+  <dt>Plaintext metadata</dt>
+  <dd>Secret <em>names</em>, <code>created</code>/<code>modified</code> timestamps, KDF parameters, and both public keys are stored unencrypted inside the vault JSON. The vault file should be treated as confidential at-rest; full-disk encryption is the recommended container.</dd>
+
+  <dt>Migration backups and tombstones</dt>
+  <dd>When a legacy vault is migrated, the original is preserved as <code>vault.backup.&lt;timestamp&gt;.json</code>. On <kbd>dota change-passphrase</kbd> or <kbd>dota rotate-keys</kbd>, those backups are converted to <em>tombstone</em> files (<code>vault.tombstone.&lt;timestamp&gt;.json</code>) that retain version + KDF metadata for forensic correlation but scrub the wrapped private keys, key commitment, and secrets. The original backup is best-effort overwritten with zeros and unlinked; on copy-on-write filesystems (btrfs, ZFS, APFS) the zero-write may land in a fresh block — recommend <code>shred(1)</code> on a flat-file filesystem if the strict guarantee matters.</dd>
+</dl>
+
+## Environment variables
+
+<dl>
+  <dt><code>DOTA_PASSPHRASE</code></dt>
+  <dd>Passphrase for non-interactive use. Convenient for CI scripts, but visible to same-UID processes via <code>/proc/&lt;pid&gt;/environ</code>. Unset in the parent shell after use; prefer interactive prompts on shared hosts.</dd>
+
+  <dt><code>DOTA_CLIPBOARD_TIMEOUT_SECS</code></dt>
+  <dd>Auto-clear interval for <kbd>dota get --copy</kbd> and the shell <code>copy</code> command. Default 30, accepted range 1&ndash;600. Out-of-range or unparseable values fall back to the default.</dd>
 </dl>
 
 <details>
@@ -176,13 +196,13 @@ JSON structure with versioning (current: `v7`, suite: `dota-v7-tchkem-mlkem768-x
   <dd>Initialize a new vault at <code>~/.dota/vault.json</code> (or <code>--vault PATH</code>).</dd>
 
   <dt><kbd>dota</kbd> &nbsp;/&nbsp; <kbd>dota unlock</kbd></dt>
-  <dd>Launch the interactive TUI (default command when no subcommand is given).</dd>
+  <dd>Launch the interactive text-mode shell (default command when no subcommand is given).</dd>
 
-  <dt><kbd>dota set <var>NAME</var> <var>VALUE</var></kbd></dt>
-  <dd>Store or update a secret. Omit <var>VALUE</var> to read from stdin or an interactive prompt.</dd>
+  <dt><kbd>dota set <var>NAME</var></kbd></dt>
+  <dd>Store or update a secret. The value is read from stdin (when piped) or from an interactive non-echoing prompt; it is never accepted on the command line, because argv is observable to other local processes via <code>/proc</code> and is recorded in shell history.</dd>
 
-  <dt><kbd>dota get <var>NAME</var></kbd></dt>
-  <dd>Print a secret value to stdout.</dd>
+  <dt><kbd>dota get <var>NAME</var> [--copy]</kbd></dt>
+  <dd>Print a secret value to stdout, or with <kbd>--copy</kbd> place it on the OS clipboard with auto-clear (default 30s, override via <code>DOTA_CLIPBOARD_TIMEOUT_SECS</code>). The stdout form is intended for pipelines (<kbd>dota get TOKEN | ssh-agent</kbd>); use <kbd>--copy</kbd> for interactive retrieval to keep the value out of terminal scrollback.</dd>
 
   <dt><kbd>dota list</kbd></dt>
   <dd>List all secret names (values are never printed).</dd>
@@ -209,29 +229,35 @@ JSON structure with versioning (current: `v7`, suite: `dota-v7-tchkem-mlkem768-x
 All commands accept <kbd>--vault <var>PATH</var></kbd> to override the default vault location.
 
 <details>
-<summary>TUI keyboard shortcuts</summary>
+<summary>Interactive shell commands (<kbd>dota</kbd> / <kbd>dota unlock</kbd>)</summary>
 
 <dl>
-  <dt><kbd>j</kbd> / <kbd>k</kbd> &nbsp;or&nbsp; <kbd>↑</kbd> / <kbd>↓</kbd></dt>
-  <dd>Navigate the secrets list.</dd>
+  <dt><code>list</code></dt>
+  <dd>List secret names with last-modified timestamps.</dd>
 
-  <dt><kbd>Enter</kbd></dt>
-  <dd>Copy the selected secret value to the clipboard.</dd>
+  <dt><code>get <var>NAME</var></code></dt>
+  <dd>Print the secret value to stdout.</dd>
 
-  <dt><kbd>n</kbd></dt>
-  <dd>Create a new secret (prompts for name and value).</dd>
+  <dt><code>copy <var>NAME</var></code></dt>
+  <dd>Copy the secret to the OS clipboard with auto-clear (default 30s).</dd>
 
-  <dt><kbd>e</kbd></dt>
-  <dd>Edit the selected secret&rsquo;s value.</dd>
+  <dt><code>set <var>NAME</var></code></dt>
+  <dd>Prompt for a value (not echoed) and store it.</dd>
 
-  <dt><kbd>d</kbd></dt>
-  <dd>Delete the selected secret (requires confirmation).</dd>
+  <dt><code>rm <var>NAME</var></code></dt>
+  <dd>Remove a secret.</dd>
 
-  <dt><kbd>r</kbd></dt>
-  <dd>Rotate all encryption keys.</dd>
+  <dt><code>info</code></dt>
+  <dd>Show vault metadata.</dd>
 
-  <dt><kbd>q</kbd></dt>
-  <dd>Quit.</dd>
+  <dt><code>refresh</code></dt>
+  <dd>Reload the vault from disk (e.g. after an out-of-band <kbd>dota rotate-keys</kbd> from another shell).</dd>
+
+  <dt><code>export</code></dt>
+  <dd>Print all secrets as <code>export KEY=VALUE</code> lines.</dd>
+
+  <dt><code>quit</code> / <code>exit</code></dt>
+  <dd>Exit the shell.</dd>
 </dl>
 
 </details>

@@ -25,9 +25,11 @@ pub const VAULT_VERSION: u32 = V7_VAULT_VERSION;
 
 #[allow(dead_code)]
 pub const V6_KEM_ALGORITHM: &str = "ML-KEM-768";
+#[allow(dead_code)]
 pub const V6_X25519_ALGORITHM: &str = "X25519";
 #[allow(dead_code)]
 pub const V6_SECRET_ALGORITHM: &str = "hybrid-mlkem768-fips203-x25519";
+#[allow(dead_code)]
 pub const V6_SUITE: &str = "dota-v6-hybrid-mlkem768-x25519-aes256gcm";
 
 // v7 TC-HKEM (Triple-Committed Hybrid KEM)

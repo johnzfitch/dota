@@ -30,6 +30,8 @@ _None identified in first pass._ The TC-HKEM v7 path validates the header HMAC u
 
 **Fix**: Pick one — either implement the clipboard path with `arboard` + a `tokio` timer to clear after N seconds, or update the README + remove the dead `arboard`/`ratatui`/`crossterm`/`tokio` dependencies. Removing dead deps also shrinks the supply-chain surface (H4).
 
+**Resolution (v1.1.0)**: Implemented the clipboard path. `arboard` retained with `default-features = false` (drops the `image` crate); auto-clear runs on a plain `std::thread` (no tokio runtime). `ratatui`, `crossterm`, and `tokio` removed. `src/cli/clipboard.rs` is the new wrapper; `dota get NAME --copy` and the shell `copy NAME` route through it. README's TUI keyboard table replaced with the actual `dota>` shell commands. Regression coverage: `src/cli/clipboard.rs::tests` (env-var parsing).
+
 ### H2 — `panic = "abort"` defeats `ZeroizeOnDrop` literally; four `.expect` panic surfaces in commitment helpers — **partially resolved in this PR; revised severity**
 
 **Reconsidered severity**: This finding's "High" rating was overstated. The README's literal phrasing ("wiped from memory on drop") does not match the runtime behavior under `panic = "abort"`, but the *security posture* it intended to describe is preserved by `harden_process`:
@@ -67,6 +69,8 @@ So `panic = "abort"` was not actually a security defect under the documented thr
 3. Document explicitly that backups carry old credential state and recommend `shred(1)` after migration.
    Tighten `create_backup` to write to a 0600 tempfile via `tempfile_in(parent)` + `persist`, the same pattern `save_vault_file` already uses.
 
+**Resolution (v1.1.0)**: Hybrid of options 1 and 3, plus the create-backup hardening. `change_passphrase` and `rotate_keys` now call `convert_backups_to_tombstone` after the new vault is atomically persisted. Tombstones (`vault.tombstone.<ts>.json`) retain version, KDF params, public keys, suite, and migration timestamps but scrub the wrapped private keys, key commitment, and the secrets map (names + ciphertexts). The original backup is best-effort zero-overwritten then unlinked; the COW-filesystem limitation is documented in the README threat model. `create_backup` now writes via `tempfile_in(parent) + persist`, so the backup is mode 0600 from inception — the `fs::copy` partial-write window is closed. Regression coverage: `tests/migration_backup_lifecycle.rs`, `tests/tombstone_roundtrip.rs`, `tests/symlink_rejected_e2e.rs`.
+
 ### H4 — `ml-kem = 0.3.0-rc.0` and other dead crypto-adjacent dependencies in production crate
 
 - `Cargo.toml:11`: `ml-kem = "0.3.0-rc.0"` — pre-release (release candidate) version of the FIPS 203 implementation. RC versions can change behavior between point releases and are not generally suitable for a security-critical build.
@@ -81,6 +85,8 @@ So `panic = "abort"` was not actually a security defect under the documented thr
 - Feature-gate `pqcrypto-kyber` and `legacy_kyber.rs` behind `migrate-legacy`.
 - Remove `arboard`, `tokio`, `ratatui`, `crossterm` until they have a call site (or implement H1).
 - Add `deny.toml` enforcing: no duplicate crypto crates, allowed licenses, allowed registries; wire `cargo deny check` into CI alongside the existing audit step.
+
+**Resolution (v1.1.0)**: `ml-kem` pinned to `=0.3.2` (current stable from crates.io). `pqcrypto-kyber` and `pqcrypto-traits` are now optional dependencies gated behind a new `legacy-migration` feature (on by default for compatibility; downstreams who never read pre-v6 vaults can opt out via `default-features = false`). `legacy_kyber` module, the v1-v5 step functions, the legacy hybrid encap/decap, and the matching test fixtures are all `#[cfg]`-gated; the no-feature path returns an actionable error mentioning the feature flag. `tokio` removed (H1 uses `std::thread`); `ratatui`/`crossterm` removed (no call sites). `deny.toml`/`cargo deny` deferred to a follow-up release — the supply-chain reduction from the dep removals is the immediate win. Regression coverage: `tests/legacy_migration_feature_gate.rs` (no-feature path), `cargo test --no-default-features` in the dev sweep (compile-time gating sanity).
 
 ## Medium
 
@@ -97,6 +103,8 @@ So `panic = "abort"` was not actually a security defect under the documented thr
 - If kept, document explicitly in `README.md` and `cli/mod.rs` that env-var passphrase is opt-in for non-interactive use and exposes the secret to same-UID observers, and unset it in the parent shell after use.
 - Add a `--passphrase-fd N` style flag (read passphrase from a specified file descriptor) as the recommended scripted-use alternative; fd transfer is not visible in `/proc/.../environ`.
 
+**Resolution (v1.1.0)**: All commands now route through `read_passphrase` — `handle_rm`, `handle_info`, `handle_change_passphrase` (current passphrase only; new is always prompted), `handle_rotate_keys`, `handle_upgrade`, `handle_export_env`, and `launch_tui`. `read_passphrase` is now `pub(crate)` and reused across modules. `cli::mod` and `README.md` both document the env-var visibility footgun. `--passphrase-fd` deferred to a follow-up release. Regression coverage: `tests/env_passphrase_uniformity.rs`.
+
 ### M2 — Defense-in-depth: `okm` not zeroized on HKDF-expand error in hybrid combiners
 
 - `crypto/hybrid.rs:243-254 (combine_shared_secrets_v7)`: `let result = hk.expand(...).map_err(...); ikm.zeroize(); result?; let key = AesKey::from_bytes(okm); okm.zeroize();` — on `result?` early return, `okm` is **not** zeroized. The same shape lives in `combine_shared_secrets_with_labels:288-302`.
@@ -105,6 +113,8 @@ So `panic = "abort"` was not actually a security defect under the documented thr
 **Impact**: Low real-world risk today; high risk of regression if a future change increases the output length or swaps the HKDF backend.
 
 **Fix**: Wrap `okm` in `Zeroizing::<[u8; 32]>` (the same pattern `derive_wrapping_keys_with_labels:810,814` already uses), then construct `AesKey` from `*okm` and let `Zeroizing` clean up on every path.
+
+**Resolution (v1.1.0)**: Applied. `combine_shared_secrets_v7` (`crypto/hybrid.rs:243-254`) and `combine_shared_secrets_with_labels` (`:288-302`) now hold `okm` in `Zeroizing<[u8; 32]>`. The post-`result?` path constructs `AesKey::from_bytes(*okm)`; the `Zeroizing` wrapper handles every exit. The audit-noted unreachability (32-byte HKDF output cannot fail) is preserved in a code comment so a future enlargement of the output length is forced to revisit the invariant.
 
 ### M3 — `derive_wrapping_keys_with_labels` zeroizes after copying out of `Zeroizing`
 
@@ -128,6 +138,8 @@ So `panic = "abort"` was not actually a security defect under the documented thr
 
 If the team wants to fix this rather than document it, the format change is large (secrets become an opaque encrypted blob keyed by an HMAC of the name; lookups become HMAC-then-search) — schedule for v8.
 
+**Resolution (v1.1.0)**: README "Security assumptions" gains a "Plaintext metadata" bullet covering secret names, timestamps, KDF params, and public keys. Format change (HMAC-keyed names) remains scheduled for v8.
+
 ### M5 — `set` / TUI `set` rejects inline values, but `dota get` still echoes secrets to stdout (and into terminal scrollback)
 
 - `cli/commands.rs:144`: `println!("{}", value.expose())` for `dota get NAME`.
@@ -138,6 +150,8 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Add a `dota get --no-stdout` mode that copies to clipboard (paired with H1) and clears after N seconds, and document it as the recommended interactive retrieval path. Keep raw `dota get` for piped use (`dota get TOKEN | ssh-agent`-style).
 
+**Resolution (v1.1.0)**: Shipped as `dota get NAME --copy` (`src/cli/clipboard.rs`). The flag routes through the OS clipboard with a 30s auto-clear (override via `DOTA_CLIPBOARD_TIMEOUT_SECS`). Bare `dota get` keeps stdout-echo behavior intact for piped consumers. README documents both modes.
+
 ### M6 — Argon2 parameter validation is bounded, but salt lower bound (16 bytes) is below modern recommendations on `change_passphrase` regen path
 
 - `vault/ops.rs:32 MIN_SALT_LEN: usize = 16` — used in `validate_kdf_params:1100`.
@@ -146,6 +160,8 @@ If the team wants to fix this rather than document it, the format change is larg
 **Impact**: Negligible today. Defense-in-depth gap if a future post-quantum salt-collision attack on Argon2 emerges (currently unknown).
 
 **Fix**: Raise `MIN_SALT_LEN` to 32 bytes for new vaults (keep 16 as the floor for legacy validation). Use `OsRng.fill_bytes(&mut [0u8; 32])` directly instead of `SaltString::generate` to avoid the base64 round-trip.
+
+**Resolution (v1.1.0)**: `generate_salt()` now returns 32 bytes from `OsRng.fill_bytes` (`crypto/kdf.rs:50`). `MIN_SALT_LEN = 16` retained as the legacy-validation floor for compatibility. Regression coverage: `tests/salt_entropy.rs`.
 
 ### M7 — Process hardening is Linux-only; macOS and Windows users get no `mlockall`, no core-dump suppression, no ptrace block
 
@@ -157,6 +173,8 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Add macOS equivalents (`PT_DENY_ATTACH`, `RLIMIT_CORE = 0`, `mlock` per-allocation rather than `mlockall`) and Windows equivalents (`SetProcessMitigationPolicy`, `CryptProtectMemory`). Until then, log a one-line warning at startup on non-Linux platforms ("Process hardening unavailable on this OS") and document the limitation in README.
 
+**Resolution (v1.1.0)**: Documentation-only step taken: `main.rs` emits a startup stderr warning on non-Linux platforms naming the unimplemented mitigations, and the README "Memory safety" card explicitly states that `harden_process` is a no-op on macOS / Windows. The platform-specific implementations remain scheduled work.
+
 ### M8 — `secure_vault_directory` silently degrades to a warning on existing-directory chmod failures
 
 - `vault/ops.rs:760-774`: if `set_permissions(parent, 0o700)` fails AND `parent_existed`, log a warning and continue.
@@ -166,6 +184,8 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Return an error instead of warning when running with a non-default `--vault PATH` whose parent is world-readable. For the default `~/.dota/`, the existing behavior is correct.
 
+**Resolution (v1.1.0)**: `secure_vault_directory` (`vault/ops.rs:760-774`) now degrades to a warning only when the parent directory matches the default `~/.dota/` (compared via canonicalization). For a user-supplied `--vault PATH` whose parent rejects chmod, it returns an error with an actionable message.
+
 ### M9 — `eprintln!` at vault-load time prints uncontrolled diagnostic strings; can corrupt a TUI
 
 - `vault/ops.rs:259-262`: `eprintln!("Migrating vault from v{} to v{}...", probe.version, VAULT_VERSION);` runs unconditionally when the on-disk version is older than current.
@@ -174,6 +194,8 @@ If the team wants to fix this rather than document it, the format change is larg
 **Impact**: Cosmetic — the migration banner can be smuggled into a piped consumer (`dota get TOKEN | ssh-agent`) and confuse downstream parsers. Not a security issue per se, but if a future hostile vault includes attacker-controlled fields in a `Migrating from v{}…` payload, this could become one.
 
 **Fix**: Route migration progress through a dedicated logger (or `eprint`-only when stderr is a tty), and never include attacker-controlled fields in the format string. The current code already only prints version numbers (u32), so it is safe today.
+
+**Resolution (v1.1.0)**: Every migration-banner `eprintln!` is now wrapped in `if std::io::stderr().is_terminal() { ... }` so piped consumers do not see it. Only u32 versions and operator-controlled paths enter the format strings; the M10 SECURITY comment block calls out the invariant.
 
 ### M10 — Secret-name validation happens *after* legacy migration completes; the "no name in migration log" invariant is unmarked
 
@@ -185,6 +207,8 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Add a `// SECURITY:` comment near each `eprintln!` / `println!` in `migration.rs` calling out that secret names from the in-flight legacy vault MUST NOT appear in any format string until `validate_v7_vault` has run. Alternatively, run `validate_secret_name` at the start of each migration step on the inbound names so the invariant is structural rather than documentary.
 
+**Resolution (v1.1.0)**: `SECURITY (M10)` comment blocks added at each migration-progress `eprintln!` in `vault/migration.rs` documenting that only version numbers and operator-controlled paths flow into the format strings. The structural-validation alternative is deferred — current invariant is documentary but explicit.
+
 ## Low
 
 ### L1 — Misleading variable name in X25519 zero-check
@@ -193,17 +217,23 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Rename to `acc` or `nonzero_or` and add a comment that `acc != 0` ⇔ at least one input byte was non-zero.
 
+**Resolution (v1.1.0)**: Renamed `is_nonzero` → `nonzero_or` (`crypto/x25519.rs:84`); comment clarifies that `nonzero_or != 0` ⇔ at least one input byte was non-zero.
+
 ### L2 — `to_string_lossy()` on the default vault path can silently drop UTF-8 errors
 
 - `vault/ops.rs:46-53 default_vault_path` uses `to_string_lossy().to_string()`. On a system with a non-UTF-8 home directory path (rare but possible), substitutions are silent.
 
 **Fix**: Either return a `PathBuf` from `default_vault_path` and propagate `Path` through the API, or fail loudly when the path is not valid UTF-8.
 
+**Resolution (v1.1.0)**: `default_vault_path()` now routes through `into_os_string().into_string()` and panics with a descriptive message on a non-UTF-8 home directory instead of silently substituting bytes. The `String`-returning API surface is preserved to keep the CLI layer unchanged. Smoke-tested in `tests/migration_backup_lifecycle.rs::default_vault_path_is_a_valid_string`.
+
 ### L3 — `ml-kem` private key stored expanded (2400 bytes) per legacy compat
 
 - `crypto/mlkem.rs:33-35` comment: "preserved to keep the current vault byte contract stable until the v6 format migration lands." v7 is current; this comment is stale.
 
 **Fix**: Update the comment or shrink to seed-form (which is what FIPS 203 actually standardizes). A separate change because it changes vault layout (would require a v8 bump).
+
+**Resolution (v1.1.0)**: Stale "until the v6 format migration lands" comment replaced with an accurate "expanded 2400-byte form retained for v7 byte-compat; seed-form migration deferred to v8" note (`crypto/mlkem.rs:32-35`). Format change itself stays scheduled for v8.
 
 ### L4 — Tests use `.unwrap()`; not a security issue but worth noting in the audit completeness check
 
@@ -215,9 +245,13 @@ If the team wants to fix this rather than document it, the format change is larg
 
 **Fix**: Document in the threat-model section.
 
+**Resolution (v1.1.0)**: Folded into the M4 "Plaintext metadata" bullet in README "Security assumptions" alongside the secret-name disclosure.
+
 ### L6 — `ratatui = "0.30"` is a higher version than upstream's published latest (`0.28.x` at audit time); double-check the version exists or this is a typo
 
 **Fix**: Verify against `crates.io`. If it does not exist, the build is currently broken on a fresh checkout — but H1 says we should be removing this dep anyway.
+
+**Resolution (v1.1.0)**: Moot — `ratatui` removed entirely under H1. `Cargo.lock` confirmed `0.30.0` existed (not a typo), but the dep had zero call sites and is gone now.
 
 ### L7 — `validate_kdf_params` migration tests don't cover `algorithm` and `parallelism` branches (carried over from PR #15 Copilot review)
 
@@ -226,6 +260,8 @@ If the team wants to fix this rather than document it, the format change is larg
 - Copilot's review comment on the PR is still open at merge time.
 
 **Fix**: Add two tests in `vault/migration.rs`: (a) a legacy vault with `kdf.algorithm = "argon2d"` should fail at the validation step; (b) a legacy vault with `parallelism = 100` should fail similarly. Same shape as the existing `memory_cost` / `time_cost` rejection tests.
+
+**Resolution (v1.1.0)**: Both branches covered by `tests/kdf_validation.rs` (`rejects_argon2d_algorithm_on_legacy_path`, `rejects_excessive_parallelism_on_legacy_path`), plus a positive-control test (`accepts_argon2id_within_bounds`) that confirms valid params advance past `validate_kdf_params`.
 
 ---
 

@@ -1,16 +1,23 @@
 [package]
 name = "dota"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["zack"]
 description = "Defense of the Artifacts - Post-quantum secure secrets manager with v7 TC-HKEM (ML-KEM-768 + X25519) vaults"
 license = "MIT"
 
+[features]
+default = ["legacy-migration"]
+# Read-only support for migrating v1-v5 vaults forward. Disable for builds
+# whose vaults are already v6+, dropping the pqcrypto-kyber supply chain.
+legacy-migration = ["dep:pqcrypto-kyber", "dep:pqcrypto-traits"]
+
 [dependencies]
 # Cryptography - Post-quantum and classical
-ml-kem = { version = "0.3.0-rc.0", features = ["getrandom", "zeroize"] }
-pqcrypto-kyber = "0.8"
-pqcrypto-traits = "0.3"
+# Pinned exactly: ml-kem byte layout is part of the v7 on-disk contract.
+ml-kem = { version = "=0.3.2", features = ["getrandom", "zeroize"] }
+pqcrypto-kyber = { version = "0.8", optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
@@ -21,11 +28,13 @@ zeroize = { version = "1.7", features = ["derive"] }
 rand = "0.8"
 rand_core = "0.6"
 
-# TUI and CLI
-ratatui = "0.30"
-crossterm = "0.28"
+# CLI
 clap = { version = "4.5", features = ["derive"] }
 rpassword = "7.3"
+
+# Clipboard (OS clipboard for `dota get --copy`; default-features off drops
+# the `image` dep and friends — we only ever set/clear text).
+arboard = { version = "3.6", default-features = false }
 
 # Data serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -35,13 +44,6 @@ base64 = "0.22"
 # Error handling and utilities
 anyhow = "1.0"
 thiserror = "2.0"
-
-# Clipboard (optional async runtime)
-arboard = "3.4"
-tokio = { version = "1.41", features = ["time", "rt"] }
-
-# ANSI art parsing
-codepage-437 = "0.1"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
