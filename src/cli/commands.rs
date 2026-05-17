@@ -156,14 +156,16 @@ pub fn handle_get(vault_path: Option<String>, name: String, copy: bool) -> Resul
     let value = get_secret(&unlocked, &name)?;
     if copy {
         let timeout = clipboard::clear_timeout_from_env();
-        clipboard::copy_with_autoclear(&value, timeout)?;
         // Status goes to stderr so it doesn't pollute pipelines that bind
         // stdout — `dota get NAME | …` keeps producing the raw secret.
+        // Printed BEFORE the blocking call so the user knows what's happening.
         eprintln!(
-            "Copied '{}' to clipboard; will clear in {}s",
+            "Copied '{}' to clipboard. Will clear in {}s (Ctrl-C to clear now).",
             name,
             timeout.as_secs()
         );
+        clipboard::copy_with_autoclear(&value, timeout)?;
+        eprintln!("Clipboard cleared.");
     } else {
         println!("{}", value.expose());
     }

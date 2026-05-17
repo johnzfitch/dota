@@ -86,12 +86,13 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             "copy" => match named_op(&mut parts, "copy", |name| {
                 let value = get_secret(&unlocked, name)?;
                 let timeout = clipboard::clear_timeout_from_env();
-                clipboard::copy_with_autoclear(&value, timeout)?;
                 eprintln!(
-                    "Copied '{}' to clipboard; will clear in {}s",
+                    "Copied '{}' to clipboard. Will clear in {}s (Ctrl-C to clear now).",
                     name,
                     timeout.as_secs()
                 );
+                clipboard::copy_with_autoclear(&value, timeout)?;
+                eprintln!("Clipboard cleared.");
                 Ok(())
             }) {
                 Ok(()) => {}

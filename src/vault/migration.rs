@@ -788,27 +788,33 @@ pub(crate) fn convert_backups_to_tombstone(vault_path: &str) -> Result<()> {
             }
         };
 
-        if let Some(obj) = tombstone.as_object_mut() {
-            // Scrub wrapped private keys and the key commitment.
-            if let Some(kem) = obj.get_mut("kem").and_then(Value::as_object_mut) {
-                kem.insert("encrypted_private_key".into(), Value::Null);
-                kem.insert("private_key_nonce".into(), Value::Null);
-            }
-            if let Some(x) = obj.get_mut("x25519").and_then(Value::as_object_mut) {
-                x.insert("encrypted_private_key".into(), Value::Null);
-                x.insert("private_key_nonce".into(), Value::Null);
-            }
-            obj.insert("key_commitment".into(), Value::Null);
-            // Encrypted secrets: stripped wholesale. Names lived in the
-            // backup JSON as plaintext keys (see M4); the tombstone drops
-            // those too.
-            obj.insert("secrets".into(), Value::Object(serde_json::Map::new()));
-            obj.insert(
-                "tombstoned_at".into(),
-                Value::String(Utc::now().to_rfc3339()),
-            );
-            obj.insert("tombstoned_from".into(), Value::String(backup_name.clone()));
+        // If the backup parsed as valid JSON but wasn't an object, we
+        // cannot safely scrub it field-by-field — emitting it as-is would
+        // defeat the H3 guarantee. Delete it outright and move on. The
+        // same fate as a JSON parse error.
+        let Some(obj) = tombstone.as_object_mut() else {
+            let _ = fs::remove_file(&backup_path);
+            continue;
+        };
+
+        // Scrub wrapped private keys and the key commitment.
+        if let Some(kem) = obj.get_mut("kem").and_then(Value::as_object_mut) {
+            kem.insert("encrypted_private_key".into(), Value::Null);
+            kem.insert("private_key_nonce".into(), Value::Null);
         }
+        if let Some(x) = obj.get_mut("x25519").and_then(Value::as_object_mut) {
+            x.insert("encrypted_private_key".into(), Value::Null);
+            x.insert("private_key_nonce".into(), Value::Null);
+        }
+        obj.insert("key_commitment".into(), Value::Null);
+        // Encrypted secrets: stripped wholesale. Names lived in the backup
+        // JSON as plaintext keys (see M4); the tombstone drops those too.
+        obj.insert("secrets".into(), Value::Object(serde_json::Map::new()));
+        obj.insert(
+            "tombstoned_at".into(),
+            Value::String(Utc::now().to_rfc3339()),
+        );
+        obj.insert("tombstoned_from".into(), Value::String(backup_name.clone()));
 
         let ts = Utc::now().format("%Y%m%d_%H%M%S%f");
         let tombstone_name = format!("{}.tombstone.{}.{}", stem, ts, ext);
@@ -834,13 +840,15 @@ pub(crate) fn convert_backups_to_tombstone(vault_path: &str) -> Result<()> {
         // overwrite with zeros to the original byte length, fsync, then
         // unlink. Limitations: on COW filesystems the overwrite may land
         // in a fresh block (documented in README).
-        if let Ok(meta) = fs::metadata(&backup_path) {
-            let len = meta.len() as usize;
-            if let Ok(mut f) = fs::OpenOptions::new().write(true).open(&backup_path) {
-                let _ = f.write_all(&vec![0u8; len]);
-                let _ = f.sync_all();
-            }
-        }
+        //
+        // TOCTOU defense: between the earlier read and this open the
+        // backup path could have been swapped to a symlink pointing at an
+        // attacker-chosen target. Re-check symlink_metadata, and on Unix
+        // open with O_NOFOLLOW so even a race that wins the metadata
+        // check cannot succeed at the open. If either guard fires, skip
+        // the overwrite — we still unlink the path (which on a symlink
+        // would unlink the symlink itself, never the target).
+        secure_delete_backup_file(&backup_path);
         let _ = fs::remove_file(&backup_path);
     }
 
@@ -850,6 +858,42 @@ pub(crate) fn convert_backups_to_tombstone(vault_path: &str) -> Result<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+/// Best-effort zero-overwrite a file before unlinking it. Symlinked or
+/// non-regular paths are skipped (the surrounding caller still unlinks
+/// the path itself, which is the desired action — for a symlink it
+/// removes the link, never the target).
+fn secure_delete_backup_file(path: &Path) {
+    use std::io::Write;
+    // Re-check immediately before the open. The check uses `symlink_metadata`
+    // so it does not follow links; the open below adds O_NOFOLLOW for the
+    // narrow race window remaining between this check and that syscall.
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if !meta.file_type().is_file() {
+            return;
+        }
+        let len = meta.len() as usize;
+        let open_result = open_for_overwrite(path);
+        if let Ok(mut f) = open_result {
+            let _ = f.write_all(&vec![0u8; len]);
+            let _ = f.sync_all();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_for_overwrite(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_for_overwrite(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).open(path)
 }
 
 /// Find existing backup files matching the pattern `{stem}.backup.*.{ext}`

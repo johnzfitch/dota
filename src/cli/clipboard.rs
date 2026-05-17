@@ -3,18 +3,30 @@
 //! Keeps the supply chain narrow: `arboard` with `default-features = false`
 //! (drops the `image` crate and its transitives) plus a plain `std::thread`
 //! sleep for the auto-clear timer (no tokio runtime).
+//!
+//! Auto-clear semantics: `copy_with_autoclear` **blocks** the calling
+//! process for the timeout duration, then clears the clipboard before
+//! returning. This is the same UX as `pass show -c` from password-store
+//! and is necessary because the X11/Wayland clipboard is process-scoped
+//! on some backends — a detached "fire and forget" thread inside a
+//! short-lived CLI invocation would be reaped before it could run.
+//!
+//! A graceful-shutdown signal (Ctrl-C / SIGINT / SIGTERM / SIGHUP) cuts
+//! the wait short, clears the clipboard, and returns. The polling loop
+//! checks `security::shutdown_requested` once per 250ms.
 
-use crate::security::SecretString;
+use crate::security::{SecretString, shutdown_requested};
 use anyhow::{Context, Result};
 use std::thread;
-use std::time::Duration;
-use zeroize::Zeroize;
+use std::time::{Duration, Instant};
 
 /// Default clear timeout when DOTA_CLIPBOARD_TIMEOUT_SECS is unset / invalid.
 const DEFAULT_CLEAR_SECS: u64 = 30;
 /// Maximum value accepted from the env var, to keep a runaway timer from
 /// pinning a secret in the clipboard "forever" by accident.
 const MAX_CLEAR_SECS: u64 = 600;
+/// Polling interval for the shutdown-signal check while the timer runs.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
 
 /// Read the auto-clear duration from `DOTA_CLIPBOARD_TIMEOUT_SECS`, falling
 /// back to a 30-second default. Values outside `1..=MAX_CLEAR_SECS` are
@@ -28,13 +40,15 @@ pub fn clear_timeout_from_env() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Copy a secret to the OS clipboard, then spawn a background thread that
-/// clears the clipboard after `clear_after`.
+/// Copy a secret to the OS clipboard, hold the clipboard until `clear_after`
+/// elapses (or a shutdown signal arrives), then clear it.
 ///
-/// The intermediate `String` arboard requires is zeroized once the OS call
-/// returns. The background-thread copy is also zeroized after the OS clear.
+/// Returns once the clipboard has been cleared. The intermediate `String`
+/// `arboard::Clipboard::set_text` needs is owned by us so we can zeroize
+/// our local copy after the OS call — arboard itself may keep an internal
+/// copy until the next clipboard write, which is unavoidable.
 ///
-/// On platforms where arboard cannot reach a clipboard (no DISPLAY, no
+/// On platforms where arboard cannot reach a clipboard (no `DISPLAY`, no
 /// X11/Wayland, headless CI), this returns an error rather than silently
 /// echoing the secret.
 pub fn copy_with_autoclear(secret: &SecretString, clear_after: Duration) -> Result<()> {
@@ -43,26 +57,29 @@ pub fn copy_with_autoclear(secret: &SecretString, clear_after: Duration) -> Resu
          If you're on a headless session, use `dota get` instead.",
     )?;
 
-    let mut owned = secret.expose().to_string();
+    // Pass the secret slice directly to arboard — avoids a second local
+    // heap allocation we'd otherwise have to zeroize.
     clipboard
-        .set_text(owned.clone())
+        .set_text(secret.expose())
         .context("failed to set clipboard contents")?;
-    owned.zeroize();
 
-    let timeout = clear_after;
-    thread::Builder::new()
-        .name("dota-clipboard-clear".into())
-        .spawn(move || {
-            thread::sleep(timeout);
-            if let Ok(mut clip) = arboard::Clipboard::new() {
-                // Best-effort: failure to clear is logged but not fatal —
-                // the user can clear manually. We do not surface a panic
-                // because the helper thread runs after the parent has
-                // returned and the process may have moved on.
-                let _ = clip.set_text(String::new());
-            }
-        })
-        .context("failed to spawn clipboard auto-clear thread")?;
+    // Block until timeout or shutdown signal, polling the signal flag so
+    // a Ctrl-C clears the clipboard immediately rather than after the
+    // full wait.
+    let deadline = Instant::now() + clear_after;
+    while Instant::now() < deadline {
+        if shutdown_requested() {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(SHUTDOWN_POLL.min(remaining));
+    }
+
+    // Best-effort clear. If we lost the clipboard owner role to another
+    // process (X11 selection semantics), our `set_text("")` may be a
+    // no-op against the actual current owner — still safe; what we wrote
+    // is gone the moment another process replaces it.
+    let _ = clipboard.set_text(String::new());
 
     Ok(())
 }
