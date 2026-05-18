@@ -31,10 +31,10 @@ dota list
 ```mermaid
 flowchart LR
     A[Passphrase] -->|Argon2id| B[Master Key mk]
-    B --> C["ML-KEM-768\nencapsulate → ss_kem, ct_kem"]
-    B --> D["X25519 ephemeral DH\n→ ss_dh, eph_pk"]
-    B -->|"τ = HMAC(mk, ct_kem ‖ eph_pk)"| E
-    C --> E["TC-HKEM combiner\nHKDF(ss_kem‖ss_dh‖ct_kem‖eph_pk‖τ)"]
+    B --> C["ML-KEM-768\nencapsulate -> ss_kem, ct_kem"]
+    B --> D["X25519 ephemeral DH\n-> ss_dh, eph_pk"]
+    B -->|"tau = HMAC(mk, ct_kem || eph_pk)"| E
+    C --> E["TC-HKEM combiner\nHKDF(ss_kem||ss_dh||ct_kem||eph_pk||tau)"]
     D --> E
     E --> F["AES-256-GCM"]
     F --> G[Encrypted Secret]
@@ -44,9 +44,9 @@ flowchart LR
 
 1. <abbr title="Module Lattice-based Key Encapsulation Mechanism, NIST FIPS 203">ML-KEM-768</abbr> encapsulation &rarr; 32-byte shared secret (`ss_kem`) + ciphertext (`ct_kem`)
 2. X25519 ephemeral <abbr title="Diffie-Hellman key exchange">DH</abbr> &rarr; 32-byte shared secret (`ss_dh`) + ephemeral public key (`eph_pk`)
-3. Passphrase commitment: &tau; = `HMAC-SHA256(mk, ct_kem ‖ eph_pk)`
+3. Passphrase commitment: &tau; = `HMAC-SHA256(mk, ct_kem || eph_pk)`
 4. Ciphertext binding: `ct_kem` and `eph_pk` are included directly in the <abbr title="HMAC-based Key Derivation Function">HKDF</abbr> input
-5. `HKDF-SHA256(ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ τ, "dota-v7-tchkem-salt", "dota-v7-secret-key")` &rarr; 32-byte AES key
+5. `HKDF-SHA256(ss_kem || ss_dh || ct_kem || eph_pk || tau, "dota-v7-tchkem-salt", "dota-v7-secret-key")` &rarr; 32-byte AES key
 
 The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM ciphertexts. A canonical authenticated header is protected by HMAC-SHA256 under the passphrase-derived master key before any private-key decryption occurs. The `v7` TC-HKEM combiner achieves best-of-both-worlds IND-CCA security and binds the passphrase into every per-secret key derivation.
 
@@ -54,19 +54,19 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
 <dl>
   <dt><mark>Post-quantum security</mark></dt>
-  <dd>Real ML-KEM-768 (NIST FIPS 203 final standard) — resists quantum computer attacks.</dd>
+  <dd>Real ML-KEM-768 (NIST FIPS 203 final standard) -- resists quantum computer attacks.</dd>
 
   <dt>Classical security</dt>
-  <dd>X25519 elliptic curve Diffie-Hellman — protects against classical adversaries.</dd>
+  <dd>X25519 elliptic curve Diffie-Hellman -- protects against classical adversaries.</dd>
 
   <dt>Best-of-both-worlds IND-CCA</dt>
   <dd>TC-HKEM ciphertext binding ensures security if <em>either</em> algorithm holds (GHP18 reduction).</dd>
 
   <dt>Passphrase commitment</dt>
-  <dd>Master key <code>mk</code> is bound into every per-secret key derivation via &tau;&nbsp;=&nbsp;HMAC(<code>mk</code>,&nbsp;<code>ct_kem&nbsp;‖&nbsp;eph_pk</code>). Knowledge of the KEM private keys alone is insufficient.</dd>
+  <dd>Master key <code>mk</code> is bound into every per-secret key derivation via &tau;&nbsp;=&nbsp;HMAC(<code>mk</code>,&nbsp;<code>ct_kem&nbsp;||&nbsp;eph_pk</code>). Knowledge of the KEM private keys alone is insufficient.</dd>
 
   <dt>Memory safety</dt>
-  <dd>Rust with <code>ZeroizeOnDrop</code> on all sensitive types — passphrases, shared secrets, and AES keys are wiped when their wrappers drop on the normal return path. The release profile uses <code>panic = "abort"</code> for fail-fast behavior, so drop glue does <em>not</em> run on panic; on Linux, <code>harden_process</code> compensates by disabling core dumps (<code>RLIMIT_CORE = 0</code>), blocking ptrace (<code>PR_SET_DUMPABLE = 0</code>), and pinning all pages with <code>mlockall</code> so freed pages cannot be observed by a same-UID process or written to swap, and the Linux page allocator zeros pages before handing them to the next process. <strong>macOS and Windows</strong> run with OS defaults only — <code>harden_process</code> is a no-op on those platforms; rely on Secure Enclave / DPAPI and full-disk encryption.</dd>
+  <dd>Rust with <code>ZeroizeOnDrop</code> on all sensitive types -- passphrases, shared secrets, and AES keys are wiped when their wrappers drop on the normal return path. The release profile uses <code>panic = "abort"</code> for fail-fast behavior, so drop glue does <em>not</em> run on panic; on Linux, <code>harden_process</code> compensates by disabling core dumps (<code>RLIMIT_CORE = 0</code>), blocking ptrace (<code>PR_SET_DUMPABLE = 0</code>), and pinning all pages with <code>mlockall</code> so freed pages cannot be observed by a same-UID process or written to swap, and the Linux page allocator zeros pages before handing them to the next process. <strong>macOS and Windows</strong> run with OS defaults only -- <code>harden_process</code> is a no-op on those platforms; rely on Secure Enclave / DPAPI and full-disk encryption.</dd>
 
   <dt>Authenticated metadata</dt>
   <dd><code>version</code>, <code>min_version</code>, algorithm IDs, public keys, and <code>suite</code> are covered by the <code>v7</code> HMAC-SHA256 key commitment before any private-key decryption.</dd>
@@ -116,7 +116,7 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
   <dd>Secret <em>names</em>, <code>created</code>/<code>modified</code> timestamps, KDF parameters, and both public keys are stored unencrypted inside the vault JSON. The vault file should be treated as confidential at-rest; full-disk encryption is the recommended container.</dd>
 
   <dt>Migration backups and tombstones</dt>
-  <dd>When a legacy vault is migrated, the original is preserved as <code>vault.backup.&lt;timestamp&gt;.json</code>. On <kbd>dota change-passphrase</kbd> or <kbd>dota rotate-keys</kbd>, those backups are converted to <em>tombstone</em> files (<code>vault.tombstone.&lt;timestamp&gt;.json</code>) that retain version + KDF metadata for forensic correlation but scrub the wrapped private keys, key commitment, and secrets. The original backup is best-effort overwritten with zeros and unlinked; on copy-on-write filesystems (btrfs, ZFS, APFS) the zero-write may land in a fresh block — recommend <code>shred(1)</code> on a flat-file filesystem if the strict guarantee matters.</dd>
+  <dd>When a legacy vault is migrated, the original is preserved as <code>vault.backup.&lt;timestamp&gt;.json</code>. On <kbd>dota change-passphrase</kbd> or <kbd>dota rotate-keys</kbd>, those backups are converted to <em>tombstone</em> files (<code>vault.tombstone.&lt;timestamp&gt;.json</code>) that retain version + KDF metadata for forensic correlation but scrub the wrapped private keys, key commitment, and secrets. The original backup is best-effort overwritten with zeros and unlinked; on copy-on-write filesystems (btrfs, ZFS, APFS) the zero-write may land in a fresh block -- recommend <code>shred(1)</code> on a flat-file filesystem if the strict guarantee matters.</dd>
 </dl>
 
 ## Environment variables
@@ -141,18 +141,18 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 ### Secret encryption (TC-HKEM)
 
 ```
-1. ML-KEM-768 encapsulate(pk_kem)  → (ss_kem, ct_kem)
-2. X25519 ephemeral DH(pk_x25519)  → (ss_dh, eph_pk)
-3. τ = HMAC-SHA256(mk, ct_kem ‖ eph_pk)
-4. IKM = ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ τ    (≈ 1216 bytes for ML-KEM-768)
+1. ML-KEM-768 encapsulate(pk_kem)  -> (ss_kem, ct_kem)
+2. X25519 ephemeral DH(pk_x25519)  -> (ss_dh, eph_pk)
+3. tau = HMAC-SHA256(mk, ct_kem || eph_pk)
+4. IKM = ss_kem || ss_dh || ct_kem || eph_pk || tau    (~= 1216 bytes for ML-KEM-768)
 5. aes_key = HKDF-SHA256(IKM, "dota-v7-tchkem-salt", "dota-v7-secret-key")
 6. (ciphertext, tag) = AES-256-GCM(plaintext, aes_key, random_nonce)
 ```
 
 **Security properties:**
 
-- **Theorem 1** &mdash; Best-of-both-worlds IND-CCA: `Adv ≤ Adv_ML-KEM^{ind-cca}(B₁) + Adv_X25519^{gap-cdh}(B₂) + q_H/2^256`. Ciphertext binding enables the B₁ reduction.
-- **Theorem 2** &mdash; Passphrase binding: `Adv^{mk-bind} ≤ Adv_HMAC^{prf}(B₃) + q_H/2^256`. Knowledge of `(dk, sk_dh)` alone is insufficient without `mk`.
+- **Theorem 1** &mdash; Best-of-both-worlds IND-CCA: `Adv <= Adv_ML-KEM^{ind-cca}(B_1) + Adv_X25519^{gap-cdh}(B_2) + q_H/2^256`. Ciphertext binding enables the B_1 reduction.
+- **Theorem 2** &mdash; Passphrase binding: `Adv^{mk-bind} <= Adv_HMAC^{prf}(B_3) + q_H/2^256`. Knowledge of `(dk, sk_dh)` alone is insufficient without `mk`.
 
 ### Vault format
 
@@ -163,7 +163,7 @@ JSON structure with versioning (current: `v7`, suite: `dota-v7-tchkem-mlkem768-x
   <dd>Protocol version for forward compatibility. Current: <code>7</code>.</dd>
 
   <dt><code>min_version</code></dt>
-  <dd>Anti-rollback floor — vault is rejected by implementations older than this version.</dd>
+  <dd>Anti-rollback floor -- vault is rejected by implementations older than this version.</dd>
 
   <dt><code>kdf</code></dt>
   <dd>Argon2id parameters: algorithm, salt, time_cost, memory_cost, parallelism.</dd>

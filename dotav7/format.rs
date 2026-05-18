@@ -56,7 +56,7 @@ pub struct Vault {
     /// v6+ cipher-suite identifier. Empty/missing for legacy vaults.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub suite: String,
-    /// Migration history — set when a vault is upgraded from an older version.
+    /// Migration history -- set when a vault is upgraded from an older version.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub migrated_from: Option<MigrationInfo>,
     /// Anti-rollback floor: vault cannot be opened by versions older than this.

@@ -26,7 +26,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
      )
  }
  
-+// ── v7 TC-HKEM (Triple-Committed Hybrid KEM) ───────────────────────────────
++// -- v7 TC-HKEM (Triple-Committed Hybrid KEM) -------------------------------
 +//
 +// Fixes two properties missing from v6:
 +//
@@ -34,12 +34,12 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +//    HKDF input, enabling the best-of-both-worlds IND-CCA reduction where
 +//    security holds if *either* ML-KEM or X25519 is secure (not both).
 +//
-+// 2. **Passphrase commitment**: τ = HMAC(mk, ct_kem ‖ eph_pk) binds the
++// 2. **Passphrase commitment**: tau = HMAC(mk, ct_kem || eph_pk) binds the
 +//    Argon2-derived master key into per-secret key derivation.  Even an
 +//    attacker who extracts dk and sk_dh from memory cannot recover per-secret
 +//    AES keys without mk (Theorem 2 in the TC-HKEM analysis).
 +
-+/// Perform v7 TC-HKEM encapsulation: ML-KEM + X25519 + mk binding → AES key
++/// Perform v7 TC-HKEM encapsulation: ML-KEM + X25519 + mk binding -> AES key
 +pub fn hybrid_encapsulate_v7(
 +    mlkem_public: &MlKemPublicKey,
 +    x25519_public: &X25519PublicKey,
@@ -52,7 +52,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +    let (x25519_eph_public, x25519_eph_private) = x25519::generate_ephemeral_keypair();
 +    let x25519_ss = x25519::diffie_hellman(&x25519_eph_private, x25519_public)?;
 +
-+    // 3. TC-HKEM combiner: ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ τ
++    // 3. TC-HKEM combiner: ss_kem || ss_dh || ct_kem || eph_pk || tau
 +    let derived_key = combine_shared_secrets_v7(
 +        kem_ss.as_bytes(),
 +        x25519_ss.as_bytes(),
@@ -94,16 +94,16 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +
 +/// TC-HKEM combiner: ciphertext-bound + passphrase-committed key derivation.
 +///
-+/// IKM = ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ HMAC(mk, ct_kem ‖ eph_pk)
++/// IKM = ss_kem || ss_dh || ct_kem || eph_pk || HMAC(mk, ct_kem || eph_pk)
 +///
 +/// Security properties (see dota-v7-tchkem-analysis.md for full proofs):
 +///
-+///   Theorem 1 — Best-of-both-worlds IND-CCA:
-+///     Adv ≤ Adv_ML-KEM^{ind-cca}(B₁) + Adv_X25519^{gap-cdh}(B₂) + q_H/2^{256}
-+///     Ciphertext binding enables the B₁ reduction (Game 2 → 3).
++///   Theorem 1 -- Best-of-both-worlds IND-CCA:
++///     Adv <= Adv_ML-KEM^{ind-cca}(B_1) + Adv_X25519^{gap-cdh}(B_2) + q_H/2^{256}
++///     Ciphertext binding enables the B_1 reduction (Game 2 -> 3).
 +///
-+///   Theorem 2 — Passphrase binding:
-+///     Adv^{mk-bind} ≤ Adv_HMAC^{prf}(B₃) + q_H/2^{256}
++///   Theorem 2 -- Passphrase binding:
++///     Adv^{mk-bind} <= Adv_HMAC^{prf}(B_3) + q_H/2^{256}
 +///     Knowledge of (dk, sk_dh) alone is insufficient without mk.
 +fn combine_shared_secrets_v7(
 +    kem_ss: &[u8; 32],
@@ -112,7 +112,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +    x25519_eph_pk: &[u8],
 +    master_key: &[u8; 32],
 +) -> Result<AesKey> {
-+    // 1. Passphrase commitment: τ = HMAC-SHA256(mk, ct_kem ‖ eph_pk)
++    // 1. Passphrase commitment: tau = HMAC-SHA256(mk, ct_kem || eph_pk)
 +    let mut mac = HmacSha256::new_from_slice(master_key)
 +        .map_err(|e| anyhow::anyhow!("HMAC init failed: {}", e))?;
 +    mac.update(kem_ct);
@@ -134,7 +134,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +    offset += x25519_eph_pk.len();
 +    ikm[offset..offset + 32].copy_from_slice(&tau);
 +
-+    // 3. HKDF-Extract + Expand → 256-bit AES key
++    // 3. HKDF-Extract + Expand -> 256-bit AES key
 +    let hk = Hkdf::<Sha256>::new(Some(V7_HKDF_SALT), &ikm);
 +    let mut okm = [0u8; 32];
 +    let result = hk
@@ -150,7 +150,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +    Ok(key)
 +}
 +
- /// Perform legacy hybrid decapsulation: Kyber768 + X25519 → AES key.
+ /// Perform legacy hybrid decapsulation: Kyber768 + X25519 -> AES key.
  pub fn hybrid_decapsulate_legacy(
      mlkem_private: &super::legacy_kyber::LegacyKyberPrivateKey,
 @@ -282,4 +413,163 @@
@@ -158,7 +158,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
          assert_ne!(legacy.as_bytes(), v6.as_bytes());
      }
 +
-+    // ── v7 TC-HKEM tests ────────────────────────────────────────────────
++    // -- v7 TC-HKEM tests ------------------------------------------------
 +
 +    #[test]
 +    fn test_v7_tchkem_round_trip() {
@@ -201,7 +201,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +        // Encapsulate with mk1
 +        let encap = hybrid_encapsulate_v7(&mlkem_pk, &x25519_pk, &mk1).unwrap();
 +
-+        // Decapsulate with mk2 — should produce different key (passphrase binding)
++        // Decapsulate with mk2 -- should produce different key (passphrase binding)
 +        let decap_key = hybrid_decapsulate_v7(
 +            &mlkem_sk,
 +            &x25519_sk,
@@ -261,7 +261,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +    #[test]
 +    fn test_v7_and_v6_produce_different_keys_same_inputs() {
 +        // The v7 combiner must be domain-separated from v6.
-+        // Even with identical shared secrets, the ciphertext binding + τ
++        // Even with identical shared secrets, the ciphertext binding + tau
 +        // in v7 IKM ensure the outputs diverge.
 +        let mk = [0x42; 32];
 +        let (mlkem_pk, mlkem_sk) = mlkem::generate_keypair().unwrap();
@@ -270,7 +270,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +        let encap_v7 = hybrid_encapsulate_v7(&mlkem_pk, &x25519_pk, &mk).unwrap();
 +        let encap_v6 = hybrid_encapsulate_v6(&mlkem_pk, &x25519_pk).unwrap();
 +
-+        // Different ciphertexts → definitely different keys, but even the
++        // Different ciphertexts -> definitely different keys, but even the
 +        // combiner structure differs so this is guaranteed.
 +        assert_ne!(encap_v7.derived_key.as_bytes(), encap_v6.derived_key.as_bytes());
 +    }
@@ -293,7 +293,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +        )
 +        .unwrap();
 +
-+        // Just verify it produces a valid key — the IKM length is checked
++        // Just verify it produces a valid key -- the IKM length is checked
 +        // implicitly by the successful HKDF operation.
 +        assert_eq!(key.as_bytes().len(), 32);
 +
@@ -304,7 +304,7 @@ diff -ruN dota/dota-main/src/crypto/hybrid.rs dota-v7/src/crypto/hybrid.rs
 +
 +    #[test]
 +    fn test_v7_passphrase_commitment_is_deterministic() {
-+        // Same inputs → same τ → same key
++        // Same inputs -> same tau -> same key
 +        let mk = [0x66; 32];
 +        let kem_ss = [0x77; 32];
 +        let x25519_ss = [0x88; 32];
@@ -447,7 +447,7 @@ diff -ruN dota/dota-main/src/vault/migration.rs dota-v7/src/vault/migration.rs
      Ok(v6)
  }
  
-+/// v6 → v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
++/// v6 -> v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
 +///
 +/// Decrypts all secrets under v6 hybrid semantics, generates fresh keypairs,
 +/// and re-encrypts under v7 TC-HKEM with passphrase commitment.
@@ -881,7 +881,7 @@ diff -ruN dota/dota-main/src/vault/ops.rs dota-v7/src/vault/ops.rs
 +pub(crate) fn verify_v6_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
      let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
          anyhow::anyhow!(
-             "Vault version {} requires a key commitment, but none was found — \
+             "Vault version {} requires a key commitment, but none was found -- \
 @@ -250,6 +262,7 @@
          vault,
          mlkem_private,
@@ -964,7 +964,7 @@ diff -ruN dota/dota-main/src/vault/ops.rs dota-v7/src/vault/ops.rs
 +        )?,
 +    };
  
-     // Decrypt the secret value — wrap in SecretVec for zeroization
+     // Decrypt the secret value -- wrap in SecretVec for zeroization
      let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
 @@ -618,6 +656,8 @@
  const WRAP_LABEL_X25519_V5: &[u8] = b"dota-v4-wrap-x25519";
@@ -1039,7 +1039,7 @@ diff -ruN dota/dota-main/src/vault/ops.rs dota-v7/src/vault/ops.rs
 +fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
 +    let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
 +        anyhow::anyhow!(
-+            "Vault version {} requires a key commitment, but none was found — \
++            "Vault version {} requires a key commitment, but none was found -- \
 +             vault file may have been tampered with",
 +            vault.version
 +        )
@@ -1047,7 +1047,7 @@ diff -ruN dota/dota-main/src/vault/ops.rs dota-v7/src/vault/ops.rs
 +    let expected = compute_v7_key_commitment(master_key, vault)?;
 +    if !security::constant_time_eq(stored_commitment, &expected) {
 +        anyhow::bail!(
-+            "Key commitment mismatch — vault may have been tampered with \
++            "Key commitment mismatch -- vault may have been tampered with \
 +             (KDF parameters, suite, or public keys were modified), or wrong passphrase"
 +        );
 +    }

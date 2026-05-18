@@ -19,7 +19,7 @@ fn dota_init_produces_salt_at_least_32_bytes() {
         .as_str()
         .expect("kdf.salt is base64 string");
 
-    // Vault stores raw bytes base64-encoded — decode and assert length.
+    // Vault stores raw bytes base64-encoded -- decode and assert length.
     use base64::Engine;
     let salt = base64::engine::general_purpose::STANDARD
         .decode(salt_b64)

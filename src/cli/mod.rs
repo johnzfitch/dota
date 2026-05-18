@@ -42,7 +42,7 @@ pub enum Commands {
 
     /// Set a secret (add or update). The value is read from stdin when
     /// piped, otherwise from an interactive prompt. The value is never
-    /// accepted on the command line — argv is visible to other local
+    /// accepted on the command line -- argv is visible to other local
     /// processes via /proc and is recorded in shell history.
     Set {
         /// Secret name

@@ -41,7 +41,7 @@ pub struct HybridEncapsulation {
     pub derived_key: AesKey,
 }
 
-/// Perform v6 hybrid encapsulation: real ML-KEM + X25519 → AES key
+/// Perform v6 hybrid encapsulation: real ML-KEM + X25519 -> AES key
 pub fn hybrid_encapsulate(
     mlkem_public: &MlKemPublicKey,
     x25519_public: &X25519PublicKey,
@@ -49,7 +49,7 @@ pub fn hybrid_encapsulate(
     hybrid_encapsulate_v6(mlkem_public, x25519_public)
 }
 
-/// Perform v6 hybrid encapsulation: real ML-KEM + X25519 → AES key
+/// Perform v6 hybrid encapsulation: real ML-KEM + X25519 -> AES key
 pub fn hybrid_encapsulate_v6(
     mlkem_public: &MlKemPublicKey,
     x25519_public: &X25519PublicKey,
@@ -76,7 +76,7 @@ pub fn hybrid_encapsulate_v6(
     })
 }
 
-/// Perform legacy hybrid encapsulation: Kyber768 + X25519 → AES key.
+/// Perform legacy hybrid encapsulation: Kyber768 + X25519 -> AES key.
 pub fn hybrid_encapsulate_legacy(
     mlkem_public: &LegacyKyberPublicKey,
     x25519_public: &X25519PublicKey,
@@ -130,7 +130,7 @@ pub fn hybrid_decapsulate_v6(
     )
 }
 
-// ── v7 TC-HKEM (Triple-Committed Hybrid KEM) ───────────────────────────────
+// -- v7 TC-HKEM (Triple-Committed Hybrid KEM) -------------------------------
 //
 // Fixes two properties missing from v6:
 //
@@ -138,12 +138,12 @@ pub fn hybrid_decapsulate_v6(
 //    HKDF input, enabling the best-of-both-worlds IND-CCA reduction where
 //    security holds if *either* ML-KEM or X25519 is secure (not both).
 //
-// 2. **Passphrase commitment**: τ = HMAC(mk, ct_kem ‖ eph_pk) binds the
+// 2. **Passphrase commitment**: tau = HMAC(mk, ct_kem || eph_pk) binds the
 //    Argon2-derived master key into per-secret key derivation.  Even an
 //    attacker who extracts dk and sk_dh from memory cannot recover per-secret
 //    AES keys without mk (Theorem 2 in the TC-HKEM analysis).
 
-/// Perform v7 TC-HKEM encapsulation: ML-KEM + X25519 + mk binding → AES key
+/// Perform v7 TC-HKEM encapsulation: ML-KEM + X25519 + mk binding -> AES key
 pub fn hybrid_encapsulate_v7(
     mlkem_public: &MlKemPublicKey,
     x25519_public: &X25519PublicKey,
@@ -156,7 +156,7 @@ pub fn hybrid_encapsulate_v7(
     let (x25519_eph_public, x25519_eph_private) = x25519::generate_ephemeral_keypair();
     let x25519_ss = x25519::diffie_hellman(&x25519_eph_private, x25519_public)?;
 
-    // 3. TC-HKEM combiner: ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ τ
+    // 3. TC-HKEM combiner: ss_kem || ss_dh || ct_kem || eph_pk || tau
     let derived_key = combine_shared_secrets_v7(
         kem_ss.as_bytes(),
         x25519_ss.as_bytes(),
@@ -198,16 +198,16 @@ pub fn hybrid_decapsulate_v7(
 
 /// TC-HKEM combiner: ciphertext-bound + passphrase-committed key derivation.
 ///
-/// IKM = ss_kem ‖ ss_dh ‖ ct_kem ‖ eph_pk ‖ HMAC(mk, ct_kem ‖ eph_pk)
+/// IKM = ss_kem || ss_dh || ct_kem || eph_pk || HMAC(mk, ct_kem || eph_pk)
 ///
 /// Security properties (see dota-v7-tchkem-analysis.md for full proofs):
 ///
-///   Theorem 1 — Best-of-both-worlds IND-CCA:
-///     Adv ≤ Adv_ML-KEM^{ind-cca}(B₁) + Adv_X25519^{gap-cdh}(B₂) + q_H/2^{256}
-///     Ciphertext binding enables the B₁ reduction (Game 2 → 3).
+///   Theorem 1 -- Best-of-both-worlds IND-CCA:
+///     Adv <= Adv_ML-KEM^{ind-cca}(B_1) + Adv_X25519^{gap-cdh}(B_2) + q_H/2^{256}
+///     Ciphertext binding enables the B_1 reduction (Game 2 -> 3).
 ///
-///   Theorem 2 — Passphrase binding:
-///     Adv^{mk-bind} ≤ Adv_HMAC^{prf}(B₃) + q_H/2^{256}
+///   Theorem 2 -- Passphrase binding:
+///     Adv^{mk-bind} <= Adv_HMAC^{prf}(B_3) + q_H/2^{256}
 ///     Knowledge of (dk, sk_dh) alone is insufficient without mk.
 fn combine_shared_secrets_v7(
     kem_ss: &[u8; 32],
@@ -216,7 +216,7 @@ fn combine_shared_secrets_v7(
     x25519_eph_pk: &[u8],
     master_key: &[u8; 32],
 ) -> Result<AesKey> {
-    // 1. Passphrase commitment: τ = HMAC-SHA256(mk, ct_kem ‖ eph_pk)
+    // 1. Passphrase commitment: tau = HMAC-SHA256(mk, ct_kem || eph_pk)
     let mut mac = HmacSha256::new_from_slice(master_key)
         .map_err(|e| anyhow::anyhow!("HMAC init failed: {}", e))?;
     mac.update(kem_ct);
@@ -238,7 +238,7 @@ fn combine_shared_secrets_v7(
     offset += x25519_eph_pk.len();
     ikm[offset..offset + 32].copy_from_slice(&tau);
 
-    // 3. HKDF-Extract + Expand → 256-bit AES key
+    // 3. HKDF-Extract + Expand -> 256-bit AES key
     let hk = Hkdf::<Sha256>::new(Some(V7_HKDF_SALT), &ikm);
     let mut okm = [0u8; 32];
     let result = hk
@@ -254,7 +254,7 @@ fn combine_shared_secrets_v7(
     Ok(key)
 }
 
-/// Perform legacy hybrid decapsulation: Kyber768 + X25519 → AES key.
+/// Perform legacy hybrid decapsulation: Kyber768 + X25519 -> AES key.
 pub fn hybrid_decapsulate_legacy(
     mlkem_private: &super::legacy_kyber::LegacyKyberPrivateKey,
     x25519_private: &super::x25519::X25519PrivateKey,
@@ -295,7 +295,7 @@ fn combine_shared_secrets_with_labels(
 
     result?;
     let key = AesKey::from_bytes(okm);
-    // Zeroize the stack buffer — data now lives inside AesKey (ZeroizeOnDrop)
+    // Zeroize the stack buffer -- data now lives inside AesKey (ZeroizeOnDrop)
     okm.zeroize();
     std::hint::black_box(&okm);
     Ok(key)
@@ -336,7 +336,7 @@ mod tests {
         let encap1 = hybrid_encapsulate(&mlkem_pk, &x25519_pk).unwrap();
         let encap2 = hybrid_encapsulate(&mlkem_pk, &x25519_pk).unwrap();
 
-        // Different ephemeral keys → different derived keys
+        // Different ephemeral keys -> different derived keys
         assert_ne!(encap1.derived_key.as_bytes(), encap2.derived_key.as_bytes());
     }
 
@@ -356,7 +356,7 @@ mod tests {
         )
         .unwrap();
 
-        // Should produce different key (ML-KEM property: wrong key → different SS)
+        // Should produce different key (ML-KEM property: wrong key -> different SS)
         assert_ne!(encap.derived_key.as_bytes(), decap_key.as_bytes());
     }
 
@@ -414,7 +414,7 @@ mod tests {
         assert_ne!(legacy.as_bytes(), v6.as_bytes());
     }
 
-    // ── v7 TC-HKEM tests ────────────────────────────────────────────────
+    // -- v7 TC-HKEM tests ------------------------------------------------
 
     #[test]
     fn test_v7_tchkem_round_trip() {
@@ -457,7 +457,7 @@ mod tests {
         // Encapsulate with mk1
         let encap = hybrid_encapsulate_v7(&mlkem_pk, &x25519_pk, &mk1).unwrap();
 
-        // Decapsulate with mk2 — should produce different key (passphrase binding)
+        // Decapsulate with mk2 -- should produce different key (passphrase binding)
         let decap_key = hybrid_decapsulate_v7(
             &mlkem_sk,
             &x25519_sk,
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn test_v7_and_v6_produce_different_keys_same_inputs() {
         // The v7 combiner must be domain-separated from v6.
-        // Even with identical shared secrets, the ciphertext binding + τ
+        // Even with identical shared secrets, the ciphertext binding + tau
         // in v7 IKM ensure the outputs diverge.
         let mk = [0x42; 32];
         let (mlkem_pk, mlkem_sk) = mlkem::generate_keypair().unwrap();
@@ -526,7 +526,7 @@ mod tests {
         let encap_v7 = hybrid_encapsulate_v7(&mlkem_pk, &x25519_pk, &mk).unwrap();
         let encap_v6 = hybrid_encapsulate_v6(&mlkem_pk, &x25519_pk).unwrap();
 
-        // Different ciphertexts → definitely different keys, but even the
+        // Different ciphertexts -> definitely different keys, but even the
         // combiner structure differs so this is guaranteed.
         assert_ne!(encap_v7.derived_key.as_bytes(), encap_v6.derived_key.as_bytes());
     }
@@ -549,7 +549,7 @@ mod tests {
         )
         .unwrap();
 
-        // Just verify it produces a valid key — the IKM length is checked
+        // Just verify it produces a valid key -- the IKM length is checked
         // implicitly by the successful HKDF operation.
         assert_eq!(key.as_bytes().len(), 32);
 
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_v7_passphrase_commitment_is_deterministic() {
-        // Same inputs → same τ → same key
+        // Same inputs -> same tau -> same key
         let mk = [0x66; 32];
         let kem_ss = [0x77; 32];
         let x25519_ss = [0x88; 32];

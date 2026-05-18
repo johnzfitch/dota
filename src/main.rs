@@ -10,18 +10,13 @@ use dota::cli::{self, Cli, Commands};
 use dota::{security, tui, vault};
 
 fn main() -> Result<()> {
-    // OS-level hardening: disable core dumps, ptrace, lock memory
     security::harden_process();
-    // Signal handlers: graceful shutdown to ensure ZeroizeOnDrop fires
     security::install_signal_handlers();
 
-    // M7: harden_process is Linux-only. On other platforms we run with OS
-    // defaults — make that visible to the operator so the README's
-    // hardening claims do not mislead.
     #[cfg(not(target_os = "linux"))]
     eprintln!(
-        "Note: OS-level hardening (mlockall, PR_SET_DUMPABLE=0, RLIMIT_CORE=0) is \
-         available only on Linux; relying on default protections on {}.",
+        "Note: OS-level hardening is available only on Linux; \
+         relying on default protections on {}.",
         std::env::consts::OS
     );
 

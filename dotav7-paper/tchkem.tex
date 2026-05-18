@@ -1,6 +1,6 @@
 \documentclass[11pt,a4paper]{article}
 
-% ── Packages ─────────────────────────────────────────────────────────────────
+% -- Packages -----------------------------------------------------------------
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
@@ -19,14 +19,14 @@
 \usepackage{enumitem}
 \usepackage{caption}
 
-% ── Theorem environments ─────────────────────────────────────────────────────
+% -- Theorem environments -----------------------------------------------------
 \newtheorem{theorem}{Theorem}[section]
 \newtheorem{lemma}[theorem]{Lemma}
 \newtheorem{definition}[theorem]{Definition}
 \newtheorem{corollary}[theorem]{Corollary}
 \newtheorem{remark}[theorem]{Remark}
 
-% ── Macros ───────────────────────────────────────────────────────────────────
+% -- Macros -------------------------------------------------------------------
 \newcommand{\Adv}{\mathsf{Adv}}
 \newcommand{\KEM}{\mathsf{KEM}}
 \renewcommand{\DH}{\mathsf{DH}}
@@ -44,7 +44,7 @@
 \newcommand{\IKM}{\mathsf{IKM}}
 \newcommand{\bytes}[1]{\texttt{#1}}
 
-% ── Colors ───────────────────────────────────────────────────────────────────
+% -- Colors -------------------------------------------------------------------
 \definecolor{pqcolor}{HTML}{6C5CE7}
 \definecolor{classiccolor}{HTML}{00B894}
 \definecolor{mkcolor}{HTML}{E17055}
@@ -52,7 +52,7 @@
 \definecolor{commitcolor}{HTML}{D63031}
 \definecolor{hkdfcolor}{HTML}{0984E3}
 
-% ── Title ────────────────────────────────────────────────────────────────────
+% -- Title --------------------------------------------------------------------
 \title{\textbf{TC-HKEM: A Triple-Committed Hybrid KEM \\
 for Post-Quantum Secrets Management} \\[0.5em]
 \large Ciphertext-Bound, Passphrase-Committed Key Derivation \\
@@ -65,7 +65,7 @@ with Provable Best-of-Both-Worlds Security}
 \begin{document}
 \maketitle
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \begin{abstract}
 We present TC-HKEM (Triple-Committed Hybrid KEM), a key derivation
 construction for password-protected secret vaults that achieves three
@@ -80,7 +80,7 @@ in the random oracle model and trace the mathematical evolution from
 the X25519-only v1~construction through to the triple-committed v7~combiner.
 \end{abstract}
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Introduction}\label{sec:intro}
 
 The harvest-now-decrypt-later threat model motivates hybrid
@@ -115,7 +115,7 @@ K = \HKDF\bigl(\mathsf{ss}_{\KEM} \,\|\, \mathsf{ss}_{\DH} \,\|\,
 where $\mk$ is the Argon2id-derived master key and $\tau$ is a 32-byte
 passphrase commitment tag. The total IKM is 1216 bytes for ML-KEM-768.
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Preliminaries}\label{sec:prelim}
 
 \subsection{Notation}
@@ -164,7 +164,7 @@ KSF & Argon2id (64\,MiB, $t{=}3$, $p{=}4$) & \cite{rfc9106} \\
 \end{tabular}
 \end{center}
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{The TC-HKEM Construction}\label{sec:construction}
 
 \begin{figure}[ht]
@@ -233,7 +233,7 @@ Domain separation labels:
 \mathsf{info}_{\mathrm{v7}} &= \bytes{"dota-v7-secret-key"}
 \end{align}
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Security Analysis}\label{sec:security}
 
 \begin{figure}[ht]
@@ -396,7 +396,7 @@ as the Argon2id-derived master key $\mk$ has been zeroized. This
 is a property that the v6 combiner does \textbf{not} possess.
 \end{corollary}
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Vault Version Evolution}\label{sec:evolution}
 
 We trace the mathematical structure of each vault version,
@@ -472,7 +472,7 @@ K_{\mathrm{v1}} = \DH(sk_{\DH}, \eph_{\mathsf{pk}}) \quad\text{(used directly as
 No KDF, no KEM, no key separation. The DH shared secret was used
 directly as the AES-256 encryption key.
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Migration Security Analysis}\label{sec:migration}
 
 The upgrade path $\mathrm{v}N \to \mathrm{v}(N{+}1)$ is implemented
@@ -502,7 +502,7 @@ all secrets. The v6~$\to$~v7 transition similarly verifies the v6
 HMAC-SHA256 commitment before decrypting and re-encrypting under
 TC-HKEM with the new passphrase commitment~$\tau$.
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Relation to CPaceOQUAKE+}\label{sec:cpace}
 
 The CPaceOQUAKE+ protocol~\cite{CPaceOQUAKE} (Vos--Jarecki--Wood, CFRG)
@@ -525,7 +525,7 @@ The key difference is that CPaceOQUAKE+ is a \emph{network protocol}
 (interactive, 5~messages), while TC-HKEM is an \emph{encryption-at-rest}
 construction (non-interactive, single encapsulation per secret).
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Implementation}\label{sec:impl}
 
 TC-HKEM is implemented in Rust in the \textsc{dota} project. Key
@@ -544,7 +544,7 @@ implement Rust's \texttt{Zeroize} and \texttt{ZeroizeOnDrop} traits.
 including v1$\to$v7 migration chains with plaintext verification.
 \end{itemize}
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \section{Conclusion}
 
 TC-HKEM provides a provably secure hybrid KEM combiner for
@@ -556,7 +556,7 @@ construction adds less than 1\,$\mu$s of overhead per secret
 and is implemented with 102 passing tests in the \textsc{dota}
 post-quantum secrets manager.
 
-% ════════════════════════════════════════════════════════════════════════════
+% ============================================================================
 \begin{thebibliography}{99}
 \bibitem{GHP18} F.~Giacon, F.~Heuer, B.~Poettering.
 \textit{KEM Combiners.} PKC 2018. ePrint 2018/024.

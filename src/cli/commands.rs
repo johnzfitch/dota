@@ -25,7 +25,7 @@ fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str 
 /// Returns a SecretString for automatic zeroization on drop.
 ///
 /// `DOTA_PASSPHRASE` is visible to same-UID processes via /proc/<pid>/environ
-/// — convenient for CI but a footgun on shared interactive systems. Unset the
+/// -- convenient for CI but a footgun on shared interactive systems. Unset the
 /// variable in the parent shell after use.
 pub(crate) fn read_passphrase(prompt: &str) -> Result<SecretString> {
     if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
@@ -48,7 +48,7 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Creating new vault at: {}", vault_path);
     println!();
 
-    // Prompt for passphrase (env-var path skips confirmation — the operator
+    // Prompt for passphrase (env-var path skips confirmation -- the operator
     // who chose DOTA_PASSPHRASE has already committed to that value).
     let env_passphrase = std::env::var("DOTA_PASSPHRASE")
         .ok()
@@ -157,7 +157,7 @@ pub fn handle_get(vault_path: Option<String>, name: String, copy: bool) -> Resul
     if copy {
         let timeout = clipboard::clear_timeout_from_env();
         // Status goes to stderr so it doesn't pollute pipelines that bind
-        // stdout — `dota get NAME | …` keeps producing the raw secret.
+        // stdout -- `dota get NAME | ...` keeps producing the raw secret.
         // Printed BEFORE the blocking call so the user knows what's happening.
         eprintln!(
             "Copied '{}' to clipboard. Will clear in {}s (Ctrl-C to clear now).",
@@ -229,7 +229,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
 
     // Display info
     println!("Vault Information");
-    println!("─────────────────");
+    println!("-----------------");
     println!("Location:      {}", vault_path);
     println!("Version:       {}", unlocked.vault.version);
     println!(
@@ -245,7 +245,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     );
     println!();
     println!("Cryptography");
-    println!("─────────────────");
+    println!("-----------------");
     println!("KEM:           {}", unlocked.vault.kem.algorithm);
     println!("X25519:        {}", unlocked.vault.x25519.algorithm);
     println!(
@@ -261,7 +261,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     if let Some(ref info) = unlocked.vault.migrated_from {
         println!();
         println!("Migration");
-        println!("─────────────────");
+        println!("-----------------");
         println!("Original version: v{}", info.original_version);
         println!(
             "Migrated at:      {}",
@@ -273,7 +273,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
                 .iter()
                 .map(|v| format!("v{}", v))
                 .collect::<Vec<_>>()
-                .join(" → ")
+                .join(" -> ")
         );
     }
 
@@ -284,7 +284,7 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
 pub fn handle_change_passphrase(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock with current passphrase (env var read for unlock only — the new
+    // Unlock with current passphrase (env var read for unlock only -- the new
     // passphrase is always prompted because the env var would otherwise be
     // recycled into ciphertext under itself).
     let current_passphrase = read_passphrase("Current passphrase: ")?;
@@ -328,7 +328,7 @@ pub fn handle_rotate_keys(vault_path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Handle 'upgrade' command — explicitly upgrade vault to latest format
+/// Handle 'upgrade' command -- explicitly upgrade vault to latest format
 pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
@@ -337,7 +337,7 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     }
 
     // Read vault to check version before prompting for passphrase. Honour
-    // the same size cap the unlock path enforces — refuse to feed a
+    // the same size cap the unlock path enforces -- refuse to feed a
     // multi-gigabyte planted vault into serde_json before any crypto runs.
     let json = crate::vault::ops::read_vault_file(&vault_path)?;
     let probe: serde_json::Value =

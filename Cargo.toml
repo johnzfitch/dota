@@ -33,7 +33,7 @@ clap = { version = "4.5", features = ["derive"] }
 rpassword = "7.3"
 
 # Clipboard (OS clipboard for `dota get --copy`; default-features off drops
-# the `image` dep and friends — we only ever set/clear text).
+# the `image` dep and friends -- we only ever set/clear text).
 arboard = { version = "3.6", default-features = false }
 
 # Data serialization

@@ -1,7 +1,7 @@
 //! H3 schema regression: a tombstone JSON must be parseable as plain
 //! `serde_json::Value` for diagnostic tooling, and the H3 contract is
 //! that scrubbed fields are explicitly nulled out (rather than absent)
-//! — diagnostic tooling can then tell "we deliberately scrubbed this"
+//! -- diagnostic tooling can then tell "we deliberately scrubbed this"
 //! apart from "this field was never written."
 
 use dota::vault::ops::{change_passphrase, create_vault, unlock_vault};

@@ -80,7 +80,7 @@ pub fn diffie_hellman(
 
     let mut shared_bytes = shared_secret.to_bytes();
     // Constant-time zero check: bitwise OR fold visits every byte without
-    // short-circuiting. `nonzero_or != 0` ⇔ at least one input byte was
+    // short-circuiting. `nonzero_or != 0` <=> at least one input byte was
     // non-zero; the comparison itself is a single u8 == 0 at the end.
     let nonzero_or = shared_bytes.iter().fold(0u8, |acc, &b| acc | b);
     if nonzero_or == 0 {
@@ -89,7 +89,7 @@ pub fn diffie_hellman(
     }
 
     let result = X25519SharedSecret(shared_bytes);
-    // Zeroize the stack copy — data now lives inside X25519SharedSecret
+    // Zeroize the stack copy -- data now lives inside X25519SharedSecret
     shared_bytes.zeroize();
     std::hint::black_box(&shared_bytes);
     Ok(result)

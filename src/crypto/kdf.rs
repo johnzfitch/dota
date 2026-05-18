@@ -46,11 +46,7 @@ impl Default for KdfConfig {
     }
 }
 
-/// Generate a random salt for KDF.
-///
-/// M6: 32 bytes from OsRng — above the 16-byte legacy floor accepted by
-/// `validate_kdf_params`, and at the RFC 9106 archival recommendation.
-/// Skips the SaltString base64 round-trip; we encode at vault-write time.
+/// Generate a 32-byte random salt for KDF input.
 pub fn generate_salt() -> Vec<u8> {
     let mut salt = vec![0u8; 32];
     OsRng.fill_bytes(&mut salt);
@@ -76,7 +72,7 @@ pub fn derive_key(passphrase: &str, config: &KdfConfig) -> Result<MasterKey> {
         .map_err(|e| anyhow::anyhow!("Argon2 derivation failed: {}", e))?;
 
     let key = MasterKey(output);
-    // Zeroize the stack buffer — the data now lives inside MasterKey
+    // Zeroize the stack buffer -- the data now lives inside MasterKey
     // (which has ZeroizeOnDrop). Use black_box to prevent the compiler
     // from eliding this write.
     output.zeroize();

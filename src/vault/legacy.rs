@@ -1,7 +1,7 @@
 //! Legacy vault format definitions for migration
 //!
 //! Contains deserialization-only structs for reading vault formats v1-v5.
-//! These are never serialized back — vaults are always written in the current format.
+//! These are never serialized back -- vaults are always written in the current format.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -73,7 +73,7 @@ pub struct VaultV2 {
 }
 
 // ---------------------------------------------------------------------------
-// v3: Nested struct layout (same crypto as v2 — master key used directly).
+// v3: Nested struct layout (same crypto as v2 -- master key used directly).
 //     Same JSON shape as v4/v5 but without HKDF key separation.
 // ---------------------------------------------------------------------------
 

@@ -65,12 +65,12 @@ fn assert_tombstone_shape(json: &str) {
 /// Helper: build a v6 vault file at `path` under `passphrase`.
 ///
 /// Reuses the migration test's v6 build path indirectly: we drop a v6
-/// JSON onto disk, then unlock it (which migrates v6→v7 and creates one
+/// JSON onto disk, then unlock it (which migrates v6->v7 and creates one
 /// `vault.backup.*.json`).
 fn write_v6_vault_then_migrate(path: &Path, passphrase: &str) {
     // Easier than hand-rolling v6 JSON: create a v7 vault, then patch the
     // version down to 6 with the v6 commitment recomputed. But we don't
-    // have a public helper for v6 commitment — so go the other direction:
+    // have a public helper for v6 commitment -- so go the other direction:
     // call `migrate_v6_via_unlock` by starting from a v6-shaped JSON
     // built using the dota crate's own format constants.
     //

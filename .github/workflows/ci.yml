@@ -47,8 +47,8 @@ jobs:
             catch (e) { log = 'no log captured: ' + e.message; }
             // Keep only the last ~6000 characters so we stay under the comment limit
             // and focus on the failure tail.
-            const tail = log.length > 6000 ? '…\n' + log.slice(log.length - 6000) : log;
-            const body = '<details><summary>cargo test failure tail (CI debugging — auto-posted)</summary>\n\n```\n' + tail + '\n```\n</details>';
+            const tail = log.length > 6000 ? '...\n' + log.slice(log.length - 6000) : log;
+            const body = '<details><summary>cargo test failure tail (CI debugging - auto-posted)</summary>\n\n```\n' + tail + '\n```\n</details>';
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,

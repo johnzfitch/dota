@@ -1,7 +1,7 @@
 //! L7 regression: `validate_kdf_params` rejection branches for `algorithm`
 //! and `parallelism` were not covered by the v1.0.x test suite (PR #15
 //! Copilot review). The legacy migration path is the easiest way to drive
-//! these arms — `upvault()` runs `validate_kdf_params` on the inbound
+//! these arms -- `upvault()` runs `validate_kdf_params` on the inbound
 //! KDF block before any crypto.
 
 #![cfg(feature = "legacy-migration")]
@@ -11,7 +11,7 @@ use std::fs;
 use tempfile::tempdir;
 
 /// Hand-built v3 JSON shape with a knob for tweaking individual KDF
-/// fields. The crypto layer is not exercised — the test asserts only
+/// fields. The crypto layer is not exercised -- the test asserts only
 /// the validate_kdf_params bail message.
 fn write_v3_with_kdf(dir_path: &std::path::Path, algorithm: &str, parallelism: u32) -> String {
     let json = format!(
@@ -76,7 +76,7 @@ fn rejects_excessive_parallelism_on_legacy_path() {
 
 #[test]
 fn accepts_argon2id_within_bounds() {
-    // Confirm the rejection tests above are tight — a vault with valid
+    // Confirm the rejection tests above are tight -- a vault with valid
     // KDF params should advance past validate_kdf_params and only fail
     // later (on crypto / passphrase decryption). We don't have a real
     // v3 fixture handy, so we just assert the failure is NOT a KDF
