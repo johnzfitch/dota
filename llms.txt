@@ -10,10 +10,12 @@
 
 ## Code
 
-- [Main](./src/main.rs): CLI entry point
+- [Main](./src/main.rs): CLI entry point (thin wrapper over the library crate)
+- [Library](./src/lib.rs): Library crate root used by the binary and integration tests
 - [TC-HKEM](./src/crypto/hybrid.rs): ML-KEM-768 + X25519 TC-HKEM combination
 - [Vault ops](./src/vault/ops.rs): Load, save, CRUD operations
-- [TUI](./src/tui/app.rs): Terminal user interface
+- [Clipboard](./src/cli/clipboard.rs): Clipboard copy with timed auto-clear
+- [Interactive shell](./src/tui/mod.rs): Minimal text-mode `dota>` shell (default unlock mode)
 
 ## Deep details (optional)
 

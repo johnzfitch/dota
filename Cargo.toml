@@ -1,16 +1,36 @@
 [package]
 name = "dota"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["zack"]
 description = "Defense of the Artifacts - Post-quantum secure secrets manager with v7 TC-HKEM (ML-KEM-768 + X25519) vaults"
 license = "MIT"
 
+[features]
+# Read-only migration of legacy v1-v5 vaults (which used pre-FIPS Kyber768).
+# Enabled by default so existing vaults keep upgrading on unlock. Security-
+# conscious downstreams whose vaults are all v6+ can build with
+# `--no-default-features` to drop the pqcrypto-kyber/pqcrypto-traits
+# supply-chain surface entirely (SECURITY-AUDIT.md H4).
+default = ["legacy-migration"]
+legacy-migration = ["dep:pqcrypto-kyber", "dep:pqcrypto-traits"]
+
 [dependencies]
 # Cryptography - Post-quantum and classical
-ml-kem = { version = "0.3.0-rc.0", features = ["getrandom", "zeroize"] }
-pqcrypto-kyber = "0.8"
-pqcrypto-traits = "0.3"
+#
+# ML-KEM-768 (FIPS 203). Exact-pinned ("=") to remove the floating-RC drift
+# flagged in SECURITY-AUDIT.md H4: a caret requirement on a pre-release can pull
+# a different point release on `cargo update` and silently change behavior in the
+# cryptographic core. Advancing to a stable ml-kem line is deferred because it
+# changes the expanded 2400-byte decapsulation-key encoding stored in the vault
+# (see L3) and so requires a coordinated vault-format (v8) migration with
+# cross-version round-trip tests.
+ml-kem = { version = "=0.3.0-rc.0", features = ["getrandom", "zeroize"] }
+# Pre-FIPS Kyber768, used only to read/migrate legacy v1-v5 vaults. Optional and
+# gated behind the `legacy-migration` feature so it is absent from
+# `--no-default-features` builds.
+pqcrypto-kyber = { version = "0.8", optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
@@ -21,9 +41,7 @@ zeroize = { version = "1.7", features = ["derive"] }
 rand = "0.8"
 rand_core = "0.6"
 
-# TUI and CLI
-ratatui = "0.30"
-crossterm = "0.28"
+# CLI
 clap = { version = "4.5", features = ["derive"] }
 rpassword = "7.3"
 
@@ -36,12 +54,11 @@ base64 = "0.22"
 anyhow = "1.0"
 thiserror = "2.0"
 
-# Clipboard (optional async runtime)
-arboard = "3.4"
-tokio = { version = "1.41", features = ["time", "rt"] }
-
-# ANSI art parsing
-codepage-437 = "0.1"
+# Clipboard. default-features = false drops the `image` crate (clipboard image
+# support is unused here), shrinking the supply-chain surface. Auto-clear uses a
+# std::thread timer, so no async runtime (tokio) is pulled in
+# (SECURITY-AUDIT.md H1).
+arboard = { version = "3.4", default-features = false }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

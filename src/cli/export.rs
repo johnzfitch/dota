@@ -1,17 +1,16 @@
 //! Export secrets as shell environment variables
 
-use crate::security::SecretString;
+use crate::cli::commands::read_passphrase;
 use crate::vault::ops::{default_vault_path, get_secret, list_secrets, unlock_vault};
 use anyhow::Result;
-use rpassword::prompt_password;
 use zeroize::Zeroize;
 
 /// Handle 'export-env' command
 pub fn handle_export_env(vault_path: Option<String>, names: Vec<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     // Determine which secrets to export

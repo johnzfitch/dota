@@ -19,9 +19,11 @@ dota init
 # Launch TUI (default command)
 dota
 
-# Or use CLI commands
-dota set API_KEY "secret-value"
-dota get API_KEY
+# Or use CLI commands (the value is read from stdin or a non-echoing prompt,
+# never from argv — argv is visible to other local processes)
+printf 'secret-value' | dota set API_KEY
+dota get API_KEY            # prints to stdout
+dota get API_KEY --copy    # copies to the clipboard instead, auto-clears
 dota list
 ```
 
@@ -79,8 +81,11 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
   <dt>Export to environment</dt>
   <dd><kbd>dota export-env VAR1 VAR2</kbd> outputs shell-compatible variable assignments for CI/CD pipelines.</dd>
 
-  <dt>TUI and CLI</dt>
-  <dd>Interactive <a href="https://github.com/ratatui/ratatui">ratatui</a> terminal interface or scriptable command-line operations.</dd>
+  <dt>Clipboard with auto-clear</dt>
+  <dd><kbd>dota get NAME --copy</kbd> (and <kbd>copy NAME</kbd> in the shell) places the secret on the system clipboard and clears it automatically after a short delay, keeping it out of terminal scrollback and shell logs. Requires a desktop session.</dd>
+
+  <dt>Interactive shell and CLI</dt>
+  <dd>A scriptable command-line interface plus a minimal interactive <code>dota&gt;</code> shell (the default when no subcommand is given).</dd>
 </dl>
 
 ## Design constraints
@@ -107,6 +112,21 @@ The vault stores ML-KEM ciphertexts, X25519 ephemeral public keys, and AES-GCM c
 
   <dt>Side channels</dt>
   <dd>No explicit protection against timing or cache attacks beyond what the underlying cryptography libraries provide.</dd>
+
+  <dt>Metadata exposure</dt>
+  <dd>Secret <em>names</em> and their <code>created</code>/<code>modified</code> timestamps are stored in plaintext inside the vault file; only the secret <em>values</em> are encrypted. Treat the vault file as confidential at rest (full-disk encryption is the recommended container). Anyone who can read the file learns which secrets exist and when they last changed, even without the passphrase.</dd>
+
+  <dt>Secret output</dt>
+  <dd><kbd>dota get NAME</kbd> prints the value to stdout, which lands in terminal scrollback, <code>script(1)</code> captures, and multiplexer history. Use <kbd>dota get NAME --copy</kbd> for interactive retrieval and reserve plain <kbd>get</kbd> for pipelines.</dd>
+
+  <dt>Non-interactive passphrase</dt>
+  <dd>Every command reads the unlock passphrase from <code>DOTA_PASSPHRASE</code> when it is set, falling back to a non-echoing prompt. This is convenient for CI, but an environment variable is visible to same-UID processes via <code>/proc/&lt;pid&gt;/environ</code> and to anything holding <code>CAP_SYS_PTRACE</code>. Set it only in non-interactive contexts and unset it afterwards.</dd>
+
+  <dt>Process hardening is Linux-only</dt>
+  <dd>Core-dump suppression, <code>PR_SET_DUMPABLE = 0</code>, and <code>mlockall</code> are applied on Linux only. On macOS and Windows, <code>dota</code> runs with default OS process protections.</dd>
+
+  <dt>Migration backups and re-keying</dt>
+  <dd>Upgrading a legacy vault writes a timestamped <code>*.backup.*.json</code> alongside it. <kbd>dota change-passphrase</kbd> and <kbd>dota rotate-keys</kbd> scrub these into hollowed <code>*.tombstone.*.json</code> files (private keys, key commitment, and secrets nulled; non-secret metadata kept) and best-effort shred the originals. On copy-on-write filesystems (btrfs, ZFS, APFS) the shredded bytes may persist on the underlying media; use full-disk encryption and, if needed, <code>shred(1)</code> on the device.</dd>
 </dl>
 
 <details>
@@ -181,8 +201,8 @@ JSON structure with versioning (current: `v7`, suite: `dota-v7-tchkem-mlkem768-x
   <dt><kbd>dota set <var>NAME</var> <var>VALUE</var></kbd></dt>
   <dd>Store or update a secret. Omit <var>VALUE</var> to read from stdin or an interactive prompt.</dd>
 
-  <dt><kbd>dota get <var>NAME</var></kbd></dt>
-  <dd>Print a secret value to stdout.</dd>
+  <dt><kbd>dota get <var>NAME</var> [<kbd>--copy</kbd>]</kbd></dt>
+  <dd>Print a secret value to stdout, or with <kbd>--copy</kbd> place it on the clipboard (auto-cleared after a short delay) instead.</dd>
 
   <dt><kbd>dota list</kbd></dt>
   <dd>List all secret names (values are never printed).</dd>
@@ -209,29 +229,41 @@ JSON structure with versioning (current: `v7`, suite: `dota-v7-tchkem-mlkem768-x
 All commands accept <kbd>--vault <var>PATH</var></kbd> to override the default vault location.
 
 <details>
-<summary>TUI keyboard shortcuts</summary>
+<summary>Interactive shell commands</summary>
+
+Running <kbd>dota</kbd> (or <kbd>dota unlock</kbd>) prompts for the passphrase and
+drops into a minimal <code>dota&gt;</code> shell:
 
 <dl>
-  <dt><kbd>j</kbd> / <kbd>k</kbd> &nbsp;or&nbsp; <kbd>↑</kbd> / <kbd>↓</kbd></dt>
-  <dd>Navigate the secrets list.</dd>
+  <dt><kbd>list</kbd></dt>
+  <dd>List secret names with their last-modified timestamps.</dd>
 
-  <dt><kbd>Enter</kbd></dt>
-  <dd>Copy the selected secret value to the clipboard.</dd>
+  <dt><kbd>get <var>NAME</var></kbd></dt>
+  <dd>Print a secret value.</dd>
 
-  <dt><kbd>n</kbd></dt>
-  <dd>Create a new secret (prompts for name and value).</dd>
+  <dt><kbd>copy <var>NAME</var></kbd></dt>
+  <dd>Copy a secret to the clipboard; it clears automatically after a short delay.</dd>
 
-  <dt><kbd>e</kbd></dt>
-  <dd>Edit the selected secret&rsquo;s value.</dd>
+  <dt><kbd>set <var>NAME</var></kbd></dt>
+  <dd>Set or update a secret; the value is read from a non-echoing prompt (never inline).</dd>
 
-  <dt><kbd>d</kbd></dt>
-  <dd>Delete the selected secret (requires confirmation).</dd>
+  <dt><kbd>rm <var>NAME</var></kbd></dt>
+  <dd>Remove a secret.</dd>
 
-  <dt><kbd>r</kbd></dt>
-  <dd>Rotate all encryption keys.</dd>
+  <dt><kbd>info</kbd></dt>
+  <dd>Show vault metadata.</dd>
 
-  <dt><kbd>q</kbd></dt>
-  <dd>Quit.</dd>
+  <dt><kbd>refresh</kbd></dt>
+  <dd>Reload the vault from disk.</dd>
+
+  <dt><kbd>export</kbd></dt>
+  <dd>Print <code>export KEY=VALUE</code> lines for all secrets.</dd>
+
+  <dt><kbd>help</kbd></dt>
+  <dd>Show the command list.</dd>
+
+  <dt><kbd>quit</kbd> &nbsp;/&nbsp; <kbd>exit</kbd></dt>
+  <dd>Leave the shell.</dd>
 </dl>
 
 </details>
@@ -255,6 +287,13 @@ cargo fmt --check && cargo clippy
 
 # Build optimized release binary
 cargo build --release
+
+# Build without legacy (v1-v5) migration support, dropping the pre-FIPS
+# pqcrypto-kyber dependency. Only do this once all your vaults are v6+.
+cargo build --release --no-default-features
+
+# Supply-chain checks (licenses, sources, bans) in addition to the RustSec audit
+cargo deny check
 ```
 
 ## License

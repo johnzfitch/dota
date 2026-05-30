@@ -1,0 +1,65 @@
+# cargo-deny configuration for dota.
+#
+# Enforces a license allowlist, flags duplicate/banned crates, and constrains
+# the crate sources for a security-critical post-quantum vault. Run with:
+#
+#     cargo deny check
+#
+# Closes SECURITY-AUDIT.md H4 (no source/license allowlist enforcement). The
+# existing `rustsec/audit-check` CI step covers RustSec advisories; this file
+# covers licenses, sources, and crate bans, which `audit-check` does not.
+
+[advisories]
+# RustSec advisory DB. `audit-check` is the primary advisory gate in CI; the
+# same ignores it honors are mirrored here so `cargo deny check advisories`
+# agrees with the audit step.
+version = 2
+yanked = "deny"
+ignore = [
+    # pqcrypto-kyber -> pqcrypto-mlkem migration is pending (it requires
+    # network access to re-vendor). The implementation is still valid
+    # ML-KEM-768; it is only reachable behind the optional `legacy-migration`
+    # feature for reading old vaults. Tracked alongside SECURITY-AUDIT.md H4.
+    "RUSTSEC-2024-0381",
+    # `paste` is archived but functional; pulled in transitively by the test
+    # framework only. No known vulnerability.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+version = 2
+# Permissive licenses only. A copyleft license slipping into a statically
+# linked secrets manager would be both a legal and a supply-chain surprise.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Multiple versions of the same crate are a smell in a security build; warn so a
+# reviewer notices a duplicated transitive dependency.
+multiple-versions = "warn"
+wildcards = "deny"
+# Never allow a second, ambiguous crypto implementation to creep in.
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "ring", wrappers = [] },
+]
+
+[sources]
+# Only crates.io. A git or alternate-registry source for a crypto crate must be
+# an explicit, reviewed decision, not a silent `cargo update` outcome.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

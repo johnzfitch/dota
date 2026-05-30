@@ -11,6 +11,10 @@
 pub mod aes_gcm;
 pub mod hybrid;
 pub mod kdf;
+/// Read-only Kyber768 compatibility for legacy `v2`-`v5` vaults. Gated behind
+/// the `legacy-migration` feature so its `pqcrypto-kyber` dependency is absent
+/// from `--no-default-features` builds (SECURITY-AUDIT.md H4).
+#[cfg(feature = "legacy-migration")]
 pub mod legacy_kyber;
 pub mod mlkem;
 pub mod x25519;

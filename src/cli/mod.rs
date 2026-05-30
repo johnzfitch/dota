@@ -1,17 +1,18 @@
 //! CLI interface and command handling
 
+pub mod clipboard;
 pub mod commands;
 pub mod export;
 
 use clap::{Parser, Subcommand};
 
-/// Defense of the Artifacts - Post-quantum secure secrets manager with `v6`
-/// ML-KEM-768 + X25519 vaults
+/// Defense of the Artifacts - Post-quantum secure secrets manager with `v7`
+/// TC-HKEM (ML-KEM-768 + X25519) vaults
 #[derive(Parser, Debug)]
 #[command(name = "dota")]
 #[command(
     version,
-    about = "Defense of the Artifacts - Post-quantum secure secrets manager with v6 ML-KEM-768 + X25519 vaults",
+    about = "Defense of the Artifacts - Post-quantum secure secrets manager with v7 TC-HKEM (ML-KEM-768 + X25519) vaults",
     long_about = None
 )]
 pub struct Cli {
@@ -44,6 +45,12 @@ pub enum Commands {
     Get {
         /// Secret name
         name: String,
+
+        /// Copy the value to the clipboard instead of printing it to stdout.
+        /// The clipboard is cleared automatically after a short delay. This
+        /// keeps the secret out of terminal scrollback and shell logs.
+        #[arg(long)]
+        copy: bool,
     },
 
     /// List all secrets

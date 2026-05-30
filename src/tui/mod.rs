@@ -1,9 +1,12 @@
 //! Minimal interactive vault shell used as the default unlock mode.
-//! The ratatui module remains in-tree, but the shipped unlock path currently
-//! enters this text-mode shell.
+//!
+//! This is the shipped interactive interface: a text-mode `dota>` shell. An
+//! earlier revision advertised a `ratatui` TUI that did not exist; that
+//! dependency and its phantom keybindings were removed (SECURITY-AUDIT.md H1).
 
 pub mod app;
 
+use crate::cli::commands::read_passphrase;
 use crate::security::{SecretString, shutdown_requested};
 use crate::vault::ops::{
     get_secret, list_secrets, remove_secret, set_secret, unlock_vault, validate_secret_name,
@@ -14,11 +17,12 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use zeroize::Zeroize;
 
-/// Launch the TUI application
+/// Launch the interactive shell.
 pub fn launch_tui(vault_path: String) -> Result<()> {
     // Wrap passphrase in SecretString — persists for session lifetime but
     // will be zeroized when this function returns (including on signal exit).
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    // Accepts DOTA_PASSPHRASE for non-interactive use, like every other command.
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     println!("dota interactive mode");
@@ -56,6 +60,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("  help                          Show this help");
                 println!("  list                          List secret names");
                 println!("  get <name>                    Show secret value");
+                println!("  copy <name>                   Copy secret to clipboard (auto-clears)");
                 println!(
                     "  set <name>                    Set/update secret (value prompted, never echoed)"
                 );
@@ -77,6 +82,22 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             }
             "get" => match named_op(&mut parts, "get", |name| {
                 get_secret(&unlocked, name).map(|value| println!("{}", value.expose()))
+            }) {
+                Ok(()) => {}
+                Err(e) => println!("error: {}", e),
+            },
+            "copy" => match named_op(&mut parts, "copy", |name| {
+                // Background auto-clear: the shell process stays alive, so the
+                // detached timer thread can clear the clipboard after the delay
+                // without blocking the prompt.
+                let value = get_secret(&unlocked, name)?;
+                crate::cli::clipboard::copy_background(value.expose())?;
+                println!(
+                    "Copied '{}' to clipboard; clears in {}s.",
+                    name,
+                    crate::cli::clipboard::CLIPBOARD_CLEAR_SECONDS
+                );
+                Ok(())
             }) {
                 Ok(()) => {}
                 Err(e) => println!("error: {}", e),

@@ -20,9 +20,21 @@ fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str 
     }
 }
 
-/// Read passphrase from DOTA_PASSPHRASE env var, falling back to interactive prompt.
-/// Returns a SecretString for automatic zeroization on drop.
-fn read_passphrase(prompt: &str) -> Result<SecretString> {
+/// Read the vault passphrase, preferring the `DOTA_PASSPHRASE` environment
+/// variable and falling back to an interactive non-echoing prompt. Returns a
+/// `SecretString` for automatic zeroization on drop.
+///
+/// Every command that unlocks the vault routes through this one function so the
+/// env-var path is honored uniformly (SECURITY-AUDIT.md M1). Callers that need
+/// a *new* passphrase (init, change-passphrase) still prompt-and-confirm
+/// interactively — the env var only supplies the unlock passphrase.
+///
+/// SECURITY: `DOTA_PASSPHRASE` is convenient for non-interactive/CI use, but an
+/// environment variable is visible to same-UID processes via
+/// `/proc/<pid>/environ` and to anything holding `CAP_SYS_PTRACE`. Set it only
+/// in non-interactive contexts and unset it in the parent shell after use. This
+/// trade-off is documented in the README.
+pub(crate) fn read_passphrase(prompt: &str) -> Result<SecretString> {
     if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
         && !p.is_empty()
     {
@@ -43,13 +55,21 @@ pub fn handle_init(vault_path: Option<String>) -> Result<()> {
     println!("Creating new vault at: {}", vault_path);
     println!();
 
-    // Prompt for passphrase (wrapped in SecretString for zeroization)
-    let passphrase = SecretString::new(prompt_password("Enter passphrase: ")?);
-    let confirm = SecretString::new(prompt_password("Confirm passphrase: ")?);
-
-    if passphrase.expose() != confirm.expose() {
-        anyhow::bail!("Passphrases do not match");
-    }
+    // Obtain the new passphrase. In non-interactive use the env var supplies
+    // it directly (no confirm prompt is possible); interactively we prompt and
+    // confirm. Either way it is wrapped in SecretString for zeroization.
+    let passphrase = if let Ok(p) = std::env::var("DOTA_PASSPHRASE")
+        && !p.is_empty()
+    {
+        SecretString::new(p)
+    } else {
+        let passphrase = SecretString::new(prompt_password("Enter passphrase: ")?);
+        let confirm = SecretString::new(prompt_password("Confirm passphrase: ")?);
+        if passphrase.expose() != confirm.expose() {
+            anyhow::bail!("Passphrases do not match");
+        }
+        passphrase
+    };
 
     if passphrase.expose().len() < 8 {
         anyhow::bail!("Passphrase must be at least 8 characters");
@@ -129,8 +149,12 @@ fn read_secret_value(name: &str) -> Result<SecretString> {
     Ok(SecretString::new(buf))
 }
 
-/// Handle 'get' command
-pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
+/// Handle 'get' command.
+///
+/// With `copy = true` the value is placed on the clipboard (auto-cleared after a
+/// short delay) instead of being printed; this keeps the secret out of terminal
+/// scrollback and shell logs (SECURITY-AUDIT.md M5).
+pub fn handle_get(vault_path: Option<String>, name: String, copy: bool) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
     validate_secret_name(&name)?;
@@ -139,9 +163,13 @@ pub fn handle_get(vault_path: Option<String>, name: String) -> Result<()> {
     let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
-    // Get and print secret (SecretString zeroized after printing)
+    // Get secret (SecretString zeroized on drop).
     let value = get_secret(&unlocked, &name)?;
-    println!("{}", value.expose());
+    if copy {
+        crate::cli::clipboard::copy_blocking(value.expose())?;
+    } else {
+        println!("{}", value.expose());
+    }
 
     Ok(())
 }
@@ -180,8 +208,8 @@ pub fn handle_rm(vault_path: Option<String>, name: String) -> Result<()> {
 
     validate_secret_name(&name)?;
 
-    // Unlock vault
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     // Remove secret
@@ -196,8 +224,8 @@ pub fn handle_rm(vault_path: Option<String>, name: String) -> Result<()> {
 pub fn handle_info(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     // Display info
@@ -257,8 +285,8 @@ pub fn handle_info(vault_path: Option<String>) -> Result<()> {
 pub fn handle_change_passphrase(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock with current passphrase
-    let current_passphrase = SecretString::new(prompt_password("Current passphrase: ")?);
+    // Unlock with current passphrase (accepts DOTA_PASSPHRASE env var)
+    let current_passphrase = read_passphrase("Current passphrase: ")?;
     let mut unlocked = unlock_vault(current_passphrase.expose(), &vault_path)?;
 
     // Prompt for new passphrase
@@ -288,8 +316,8 @@ pub fn handle_change_passphrase(vault_path: Option<String>) -> Result<()> {
 pub fn handle_rotate_keys(vault_path: Option<String>) -> Result<()> {
     let vault_path = vault_path.unwrap_or_else(default_vault_path);
 
-    // Unlock vault
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    // Unlock vault (accepts DOTA_PASSPHRASE env var for programmatic use)
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     // Perform key rotation
@@ -325,7 +353,7 @@ pub fn handle_upgrade(vault_path: Option<String>) -> Result<()> {
     }
 
     println!("Upgrading vault from v{} to v{}...", version, VAULT_VERSION);
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    let passphrase = read_passphrase("Vault passphrase: ")?;
 
     // unlock_vault handles migration automatically
     let _unlocked = unlock_vault(passphrase.expose(), &vault_path)?;

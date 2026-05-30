@@ -2,6 +2,34 @@
 
 Scope: `dota` v1.0.0 commit on branch `claude/plan-security-audit-e11PJ`. Methodology and checklist live in the audit plan; this document records concrete findings.
 
+> **Resolution status (v1.1.0).** All open findings below are addressed in the
+> v1.1.0 audit-cleanup change set. Each finding is annotated inline with its
+> resolution. Summary:
+>
+> | Finding | Status | Where |
+> | --- | --- | --- |
+> | H1 | Fixed | clipboard path (`src/cli/clipboard.rs`, `get --copy`, shell `copy`); dead `ratatui`/`crossterm`/`tokio` deps removed; README synced |
+> | H2 | Already resolved (`b382dbe`) | annotation only |
+> | H3 | Fixed | backup → tombstone scrub on `change_passphrase`/`rotate_keys`; `create_backup` already 0o600-from-creation via `tempfile + persist` |
+> | H4 | Fixed | `ml-kem` exact-pinned; `pqcrypto-kyber`/`-traits` gated behind `legacy-migration` feature; `deny.toml` added; dead deps removed |
+> | M1 | Fixed | every command unlocks via `read_passphrase` (env var honored uniformly), documented in README |
+> | M2 | Fixed | `okm` wrapped in `Zeroizing` in both v6 and v7 combiners (wiped on the error path too) |
+> | M3 | Acknowledged (correct by design) | belt-and-suspenders comment added at `derive_wrapping_keys_with_labels` |
+> | M4 | Documented | README "Metadata exposure" |
+> | M5 | Fixed + documented | `get --copy` clipboard path; README "Secret output" |
+> | M6 | Fixed | `generate_salt` now draws 32 random bytes; validation floor stays 16 for legacy |
+> | M7 | Documented | README "Process hardening is Linux-only" |
+> | M8 | Fixed | non-default `--vault` parent dir whose chmod fails is now a hard error; default `~/.dota/` keeps the warning |
+> | M9 | Fixed | migration/backup banners gated on interactive stderr |
+> | M10 | Fixed | `// SECURITY:` notes on migration logging; names still never formatted pre-validation |
+> | L1 | Fixed | X25519 zero-check accumulator renamed `nonzero_acc` with a comment |
+> | L2 | Open (deferred) | `default_vault_path` still returns `String`; low impact |
+> | L3 | Documented | `MlKemPrivateKey` comment updated; seed-form shrink deferred to v8 |
+> | L4 | N/A | meta-finding about H2 |
+> | L5 | Documented | README "Metadata exposure" covers timestamps |
+> | L6 | Fixed | `ratatui` removed entirely (no version to verify) |
+> | L7 | Fixed | `algorithm`/`parallelism` rejection tests present in `migration.rs` |
+
 Severity rubric:
 
 - **Critical**: key/plaintext disclosure, auth bypass, or downgrade with known threat model.

@@ -20,6 +20,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
+use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
@@ -29,6 +30,10 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 const KDF_ALGORITHM: &str = "argon2id";
 const SECRET_ALGORITHM: &str = "hybrid-mlkem768-x25519";
+// Lower bound accepted when *validating* an on-disk vault. Kept at 16 (RFC 9106
+// minimum) so legacy vaults written with the old 22-byte base64 salt still
+// unlock. Newly generated vaults use 32 bytes via `crypto::kdf::generate_salt`
+// (SECURITY-AUDIT.md M6).
 const MIN_SALT_LEN: usize = 16;
 const MAX_SALT_LEN: usize = 128;
 const MIN_TIME_COST: u32 = 1;
@@ -256,10 +261,17 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
             version
         ),
         version if version < VAULT_VERSION => {
-            eprintln!(
-                "Migrating vault from v{} to v{}...",
-                probe.version, VAULT_VERSION
-            );
+            // SECURITY (M9): only announce migration on an interactive stderr.
+            // When stderr is piped (e.g. `dota get TOKEN | consumer`) this
+            // banner would otherwise be smuggled into the downstream stream.
+            // Only version numbers (u32) are ever formatted here — never any
+            // attacker-controlled vault field.
+            if std::io::stderr().is_terminal() {
+                eprintln!(
+                    "Migrating vault from v{} to v{}...",
+                    probe.version, VAULT_VERSION
+                );
+            }
             let vault = super::migration::upvault(&json, passphrase, vault_path)?;
             unlock_v7(vault, passphrase, vault_path)
         }
@@ -292,6 +304,9 @@ fn derive_master_key(passphrase: &str, vault: &Vault) -> Result<MasterKey> {
     derive_key(passphrase, &kdf_config)
 }
 
+/// Only the legacy v5→v6 migration step verifies a v5 commitment, so this is
+/// dead in `--no-default-features` builds (SECURITY-AUDIT.md H4 feature gate).
+#[cfg(feature = "legacy-migration")]
 pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     if let Some(ref stored_commitment) = vault.key_commitment {
         let expected = compute_v5_key_commitment(
@@ -500,7 +515,24 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
 
     save_vault(unlocked)?;
 
+    // SECURITY (H3): any migration backup next to this vault still holds key
+    // material wrapped under the *previous* passphrase. After a passphrase
+    // change those backups undermine the operator's "old credentials no longer
+    // help" mental model, so scrub them into hollowed tombstones now.
+    scrub_backups_best_effort(&unlocked.path);
+
     Ok(())
+}
+
+/// Best-effort scrub of migration backups, used after re-keying operations.
+/// A failure here must not fail the surrounding operation (the vault is already
+/// saved), so it only warns — and only on an interactive stderr (M9).
+fn scrub_backups_best_effort(vault_path: &str) {
+    if let Err(e) = super::migration::scrub_migration_backups(vault_path)
+        && std::io::stderr().is_terminal()
+    {
+        eprintln!("Warning: failed to scrub migration backups: {e}");
+    }
 }
 
 /// Rotate vault key material and re-encrypt all secrets with the new keys
@@ -596,6 +628,13 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
     // SecretString is zeroized via ZeroizeOnDrop.
 
     save_vault(unlocked)?;
+
+    // SECURITY (H3): key rotation replaces all wrapped key material, but
+    // migration backups next to the vault still carry the pre-rotation keys.
+    // Scrub them into hollowed tombstones so a compromise of the old key
+    // material cannot be applied to a stale backup.
+    scrub_backups_best_effort(&unlocked.path);
+
     Ok(())
 }
 
@@ -702,7 +741,7 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
     }
 
     #[cfg(unix)]
-    secure_vault_directory(parent, parent_existed)?;
+    secure_vault_directory(parent, parent_existed, is_default_vault_path(path))?;
 
     let json = serde_json::to_string_pretty(vault).context("Failed to serialize vault")?;
 
@@ -750,8 +789,13 @@ fn create_vault_directory(parent: &Path) -> Result<()> {
     Ok(())
 }
 
+/// True when `path` is exactly the default vault location (`~/.dota/vault.json`).
+fn is_default_vault_path(path: &str) -> bool {
+    Path::new(path) == Path::new(&default_vault_path())
+}
+
 #[cfg(unix)]
-fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
+fn secure_vault_directory(parent: &Path, parent_existed: bool, is_default: bool) -> Result<()> {
     let mut perms = fs::metadata(parent)
         .context("Failed to inspect vault directory permissions")?
         .permissions();
@@ -759,10 +803,17 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
 
     match fs::set_permissions(parent, perms) {
         Ok(()) => Ok(()),
-        Err(err) if parent_existed && is_nonfatal_directory_permission_error(&err) => {
-            // Existing directories may live under temp/system-managed paths that
-            // reject chmod. Keep file hardening strict, but do not fail when we
-            // cannot redefine policy for a directory we did not create.
+        // SECURITY (M8): only the *default* `~/.dota/` location may degrade to a
+        // warning when chmod fails — that directory's parent (the home dir) is
+        // already owned by the user, so a chmod refusal there is benign. For a
+        // user-supplied `--vault PATH` we fail loudly instead: writing a vault
+        // into a directory we could not make private (e.g. a world-readable
+        // shared dir) would let an observer enumerate vault and backup
+        // filenames. The vault file itself is still 0o600, but the directory
+        // listing is the leak we refuse to accept silently.
+        Err(err)
+            if parent_existed && is_default && is_nonfatal_directory_permission_error(&err) =>
+        {
             eprintln!(
                 "Warning: unable to tighten existing vault directory permissions for {}: {}",
                 parent.display(),
@@ -770,7 +821,11 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
             );
             Ok(())
         }
-        Err(err) => Err(err).context("Failed to secure vault directory"),
+        Err(err) => Err(err).context(format!(
+            "Failed to secure vault directory {} to owner-only (0o700); refusing to \
+             write a vault into a directory whose permissions could not be restricted",
+            parent.display()
+        )),
     }
 }
 
@@ -819,7 +874,12 @@ fn derive_wrapping_keys_with_labels(
         mlkem: AesKey::from_bytes(*mlkem_key),
         x25519: AesKey::from_bytes(*x25519_key),
     };
-    // Zeroize stack temporaries — data now lives inside AesKey (ZeroizeOnDrop)
+    // SECURITY (M3): `*mlkem_key` dereferenced a `[u8; 32]` (Copy) into
+    // `AesKey::from_bytes`, so the byte copy inside the Zeroizing guard would be
+    // wiped on drop regardless. The explicit zeroize + black_box here is
+    // deliberate belt-and-suspenders, not redundancy to be "cleaned up": it
+    // forces the wipe before the (otherwise compiler-elidable) drop and keeps
+    // the wipe observable. Do not delete it in favor of relying on drop alone.
     mlkem_key.zeroize();
     x25519_key.zeroize();
     std::hint::black_box(&mlkem_key);
@@ -827,6 +887,9 @@ fn derive_wrapping_keys_with_labels(
     Ok(keys)
 }
 
+/// v3→v4 migration is the only caller, so this alias is dead in
+/// `--no-default-features` builds (SECURITY-AUDIT.md H4 feature gate).
+#[cfg(feature = "legacy-migration")]
 pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     derive_wrapping_keys_v5(mk)
 }

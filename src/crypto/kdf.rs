@@ -4,9 +4,18 @@
 //! hardened parameters: t=3, m=65536 KiB (64 MiB), p=4
 
 use anyhow::Result;
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
+use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Salt length for newly generated vaults, in bytes.
+///
+/// RFC 9106 recommends ≥ 16 bytes and ≥ 32 bytes for archival contexts; a vault
+/// is archival. The vault unlock path still accepts a 16-byte floor for legacy
+/// vaults — this constant governs only freshly generated salts
+/// (SECURITY-AUDIT.md M6).
+pub const NEW_SALT_LEN: usize = 32;
 
 /// Master key derived from passphrase (256 bits)
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -45,12 +54,17 @@ impl Default for KdfConfig {
     }
 }
 
-/// Generate a random salt for KDF
+/// Generate a random salt for the KDF.
+///
+/// Returns [`NEW_SALT_LEN`] bytes drawn directly from the OS CSPRNG. The earlier
+/// implementation went through `SaltString::generate`, which produced a 22-byte
+/// base64 string carrying only 16 bytes of entropy; drawing raw bytes avoids the
+/// base64 round-trip and raises the entropy to 32 bytes for new vaults
+/// (SECURITY-AUDIT.md M6).
 pub fn generate_salt() -> Vec<u8> {
-    SaltString::generate(&mut OsRng)
-        .as_str()
-        .as_bytes()
-        .to_vec()
+    let mut salt = vec![0u8; NEW_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    salt
 }
 
 /// Derive master key from passphrase using Argon2id
@@ -145,8 +159,10 @@ mod tests {
         let salt2 = generate_salt();
 
         assert_ne!(salt1, salt2);
-        assert!(!salt1.is_empty());
-        assert!(!salt2.is_empty());
+        assert_eq!(salt1.len(), NEW_SALT_LEN);
+        assert_eq!(salt2.len(), NEW_SALT_LEN);
+        // 32 bytes is the M6 archival-strength floor for new vaults.
+        assert_eq!(NEW_SALT_LEN, 32);
     }
 
     #[test]
