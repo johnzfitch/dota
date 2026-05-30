@@ -1763,6 +1763,10 @@ mod tests {
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
     }
 
+    // Exercises the v5→v6 migration path, which only exists when the
+    // `legacy-migration` feature is enabled. Without it, unlock bails with the
+    // feature-gate message before reaching the v5 commitment check.
+    #[cfg(feature = "legacy-migration")]
     #[test]
     fn test_v5_vault_rejects_stripped_key_commitment() {
         let tmp = NamedTempFile::new().unwrap();
