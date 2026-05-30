@@ -20,14 +20,18 @@ fn describe_key_commitment(vault: &crate::vault::format::Vault) -> &'static str 
     }
 }
 
-/// Read the vault passphrase, preferring the `DOTA_PASSPHRASE` environment
+/// Read a vault passphrase, preferring the `DOTA_PASSPHRASE` environment
 /// variable and falling back to an interactive non-echoing prompt. Returns a
 /// `SecretString` for automatic zeroization on drop.
 ///
 /// Every command that unlocks the vault routes through this one function so the
-/// env-var path is honored uniformly (SECURITY-AUDIT.md M1). Callers that need
-/// a *new* passphrase (init, change-passphrase) still prompt-and-confirm
-/// interactively — the env var only supplies the unlock passphrase.
+/// env-var path is honored uniformly (SECURITY-AUDIT.md M1).
+///
+/// `change_passphrase` still prompts-and-confirms interactively for the *new*
+/// passphrase (a confirmation prompt is meaningless against an env var). Note
+/// that `handle_init` reads `DOTA_PASSPHRASE` directly — when set, it is used as
+/// the *new* vault passphrase for non-interactive provisioning — so this env
+/// var supplies both the unlock passphrase here and the init passphrase there.
 ///
 /// SECURITY: `DOTA_PASSPHRASE` is convenient for non-interactive/CI use, but an
 /// environment variable is visible to same-UID processes via

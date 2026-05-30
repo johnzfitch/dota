@@ -22,6 +22,7 @@
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use std::io::IsTerminal;
 use std::thread;
 use std::time::Duration;
 
@@ -39,10 +40,15 @@ pub fn copy_blocking(value: &str) -> Result<()> {
         .set_text(value.to_owned())
         .context("Failed to write secret to the system clipboard")?;
 
-    println!(
-        "Secret copied to clipboard; it will be cleared in {CLIPBOARD_CLEAR_SECONDS}s. \
-         Press Ctrl-C to exit sooner (the clipboard is then cleared by your session)."
-    );
+    // Status goes to stderr, and only when stderr is a terminal: `dota get
+    // NAME --copy` keeps stdout empty so it stays safe to pipe/redirect, and a
+    // non-interactive caller should not get a banner at all.
+    if std::io::stderr().is_terminal() {
+        eprintln!(
+            "Secret copied to clipboard; it will be cleared in {CLIPBOARD_CLEAR_SECONDS}s. \
+             Press Ctrl-C to exit sooner (the clipboard is then cleared by your session)."
+        );
+    }
     thread::sleep(Duration::from_secs(CLIPBOARD_CLEAR_SECONDS));
 
     // Best-effort clear. If another application has since taken ownership of the

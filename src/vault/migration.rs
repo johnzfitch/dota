@@ -756,7 +756,8 @@ fn parse_kdf_params(json: &str) -> Result<super::format::KdfParams> {
 /// live vault has been re-keyed those backups would let an attacker who later
 /// recovers the old passphrase decrypt a stale copy, breaking the operator's
 /// "old credentials no longer help" expectation. Each backup is rewritten into
-/// `<stem>.tombstone.<ts>.<ext>`: non-secret metadata (version, KDF params,
+/// `<stem>.tombstone.<unique>.<ext>` (reusing the backup's unique component so
+/// tombstones cannot collide): non-secret metadata (version, KDF params,
 /// public keys, suite, timestamps) is kept for forensic correlation while the
 /// wrapped private keys, the key commitment, and the secrets map are nulled.
 /// The original backup bytes are best-effort zero-overwritten and unlinked.
@@ -801,8 +802,22 @@ fn tombstone_backup(backup_path: &Path, parent: &Path, stem: &str, ext: &str) ->
     hollow_vault_json(&mut doc);
     let serialized = serde_json::to_string_pretty(&doc).context("Failed to serialize tombstone")?;
 
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S_%6f");
-    let tombstone_path = parent.join(format!("{}.tombstone.{}.{}", stem, timestamp, ext));
+    // Derive the tombstone name from the backup's own unique component rather
+    // than from `Utc::now()`. Two backups scrubbed within the same microsecond
+    // would otherwise collide on a `now()`-based name, and the second `persist`
+    // would clobber the first / fail — leaving a backup unsanitized and
+    // defeating H3. The backup filename is `<stem>.backup.<unique>.<ext>`; reuse
+    // `<unique>` so the tombstone name is unique whenever the backup name was.
+    let backup_name = backup_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let unique = backup_name
+        .strip_prefix(&format!("{stem}.backup."))
+        .and_then(|rest| rest.strip_suffix(&format!(".{ext}")))
+        .map(str::to_string)
+        .unwrap_or_else(|| Utc::now().format("%Y%m%d_%H%M%S_%6f").to_string());
+    let tombstone_path = parent.join(format!("{}.tombstone.{}.{}", stem, unique, ext));
     super::ops::reject_symlink_path(&tombstone_path, "write tombstone")?;
     write_private_file(parent, &tombstone_path, serialized.as_bytes())?;
 

@@ -1369,7 +1369,7 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::os::unix::fs as unix_fs;
-    use tempfile::{NamedTempFile, tempdir};
+    use tempfile::tempdir;
 
     fn build_v6_commitment_test_vault() -> Vault {
         Vault {
@@ -1500,8 +1500,9 @@ mod tests {
 
     #[test]
     fn test_create_and_unlock_vault() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-passphrase", vault_path).unwrap();
         let unlocked = unlock_vault("test-passphrase", vault_path).unwrap();
@@ -1514,8 +1515,9 @@ mod tests {
 
     #[test]
     fn test_unlock_staged_v6_vault() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "test-passphrase");
         let unlocked = unlock_vault("test-passphrase", vault_path).unwrap();
@@ -1528,8 +1530,9 @@ mod tests {
 
     #[test]
     fn test_wrong_passphrase_fails() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("correct-passphrase", vault_path).unwrap();
         let result = unlock_vault("wrong-passphrase", vault_path);
@@ -1539,8 +1542,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_future_min_version() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-passphrase");
         vault.min_version = V7_VAULT_VERSION + 1;
@@ -1560,8 +1564,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_invalid_suite() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-passphrase");
         vault.suite = "dota-v6-invalid-suite".to_string();
@@ -1581,8 +1586,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_invalid_kem_algorithm() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-passphrase");
         vault.kem.algorithm = "ML-KEM-768-legacy".to_string();
@@ -1602,8 +1608,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_invalid_x25519_algorithm() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-passphrase");
         vault.x25519.algorithm = "curve25519".to_string();
@@ -1623,8 +1630,9 @@ mod tests {
 
     #[test]
     fn test_set_and_get_secret() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-pass", vault_path).unwrap();
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1637,8 +1645,9 @@ mod tests {
 
     #[test]
     fn test_set_and_get_secret_on_staged_v6_vault_uses_v6_algorithm() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "test-pass");
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1655,8 +1664,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_tampered_public_key_via_commitment() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-passphrase");
         vault.kem.public_key[0] ^= 0x01;
@@ -1668,8 +1678,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_legacy_secret_algorithm_string() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "test-pass");
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1686,8 +1697,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_malformed_secret_ephemeral_public_key_length() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "test-pass");
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1712,8 +1724,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_rejects_all_zero_secret_ephemeral_public_key() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "test-pass");
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1734,8 +1747,9 @@ mod tests {
 
     #[test]
     fn test_remove_secret() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-pass", vault_path).unwrap();
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1749,8 +1763,9 @@ mod tests {
 
     #[test]
     fn test_list_secrets() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-pass", vault_path).unwrap();
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1769,8 +1784,9 @@ mod tests {
     #[cfg(feature = "legacy-migration")]
     #[test]
     fn test_v5_vault_rejects_stripped_key_commitment() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         // Create a staged legacy v5 vault with a valid key commitment.
         create_vault("test-pass", vault_path).unwrap();
@@ -1817,8 +1833,9 @@ mod tests {
 
     #[test]
     fn test_unlock_v6_checks_commitment_before_private_key_decrypt() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         let mut vault = write_v7_vault(vault_path, "test-pass");
         vault.key_commitment = Some(vec![0x00; 32]);
@@ -1835,8 +1852,9 @@ mod tests {
 
     #[test]
     fn test_change_passphrase_preserves_staged_v6_metadata() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         write_v7_vault(vault_path, "old-pass");
         let mut unlocked = unlock_vault("old-pass", vault_path).unwrap();
@@ -1866,8 +1884,9 @@ mod tests {
 
     #[test]
     fn test_unlock_rejects_oversized_kdf_memory() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-passphrase", vault_path).unwrap();
 
@@ -1885,8 +1904,9 @@ mod tests {
 
     #[test]
     fn test_get_secret_rejects_unknown_algorithm() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-pass", vault_path).unwrap();
         let mut unlocked = unlock_vault("test-pass", vault_path).unwrap();
@@ -1914,8 +1934,9 @@ mod tests {
 
     #[test]
     fn test_create_vault_sets_restrictive_permissions() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         create_vault("test-passphrase", vault_path).unwrap();
 
@@ -1928,8 +1949,9 @@ mod tests {
 
     #[test]
     fn test_unlock_rejects_oversized_vault_file() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         // Plant a JSON-shaped file that comfortably exceeds the cap. We do
         // not need it to be a valid vault — the size check runs before any
@@ -1947,8 +1969,9 @@ mod tests {
 
     #[test]
     fn test_unlock_rejects_vault_with_malicious_secret_name() {
-        let tmp = NamedTempFile::new().unwrap();
-        let vault_path = tmp.path().to_str().unwrap();
+        let tmp = tempdir().unwrap();
+        let vault_path_buf = tmp.path().join("vault.json");
+        let vault_path = vault_path_buf.to_str().unwrap();
 
         // Build a normal v7 vault, then rewrite the secret map under a name
         // carrying a bidi override. This is the "poisoned vault" case the

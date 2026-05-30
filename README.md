@@ -16,7 +16,7 @@ cargo install --path .
 # Initialize vault (stored at ~/.dota/vault.json by default)
 dota init
 
-# Launch TUI (default command)
+# Launch the interactive dota> shell (default command)
 dota
 
 # Or use CLI commands (the value is read from stdin or a non-echoing prompt,
