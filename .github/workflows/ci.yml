@@ -99,4 +99,7 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
+          # Scoped to bans/licenses/sources: RustSec advisories are owned by the
+          # separate `security` job (rustsec/audit-check) with its allow list in
+          # .cargo/audit.toml. See deny.toml header.
+          command: check bans licenses sources

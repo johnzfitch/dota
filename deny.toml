@@ -1,30 +1,17 @@
 # cargo-deny configuration for dota.
 #
-# Enforces a license allowlist, flags duplicate/banned crates, and constrains
-# the crate sources for a security-critical post-quantum vault. Run with:
+# Enforces a license allowlist, flags banned/wildcard crates, and constrains the
+# crate sources for a security-critical post-quantum vault. Run with:
 #
-#     cargo deny check
+#     cargo deny check bans licenses sources
 #
-# Closes SECURITY-AUDIT.md H4 (no source/license allowlist enforcement). The
-# existing `rustsec/audit-check` CI step covers RustSec advisories; this file
-# covers licenses, sources, and crate bans, which `audit-check` does not.
-
-[advisories]
-# RustSec advisory DB. `audit-check` is the primary advisory gate in CI; the
-# same ignores it honors are mirrored here so `cargo deny check advisories`
-# agrees with the audit step (see .cargo/audit.toml).
-version = 2
-yanked = "deny"
-ignore = [
-    # pqcrypto-kyber -> pqcrypto-mlkem migration is pending (it requires
-    # network access to re-vendor). The implementation is still valid
-    # ML-KEM-768; it is only reachable behind the optional `legacy-migration`
-    # feature for reading old vaults. Tracked alongside SECURITY-AUDIT.md H4.
-    "RUSTSEC-2024-0381",
-    # `paste` is archived but functional; pulled in transitively by the test
-    # framework only. No known vulnerability.
-    "RUSTSEC-2024-0436",
-]
+# Closes SECURITY-AUDIT.md H4 (no source/license allowlist enforcement). This
+# file is deliberately the *non-advisory* complement to the existing
+# `rustsec/audit-check` CI step: RustSec advisories (vulnerabilities, yanks,
+# unmaintained/unsound crates) remain owned solely by that step, with their
+# allow/ignore list in `.cargo/audit.toml`. Running cargo-deny's `advisories`
+# check here too would create a second, divergent advisory gate, so the CI job
+# scopes itself to `bans licenses sources`.
 
 [licenses]
 version = 2
