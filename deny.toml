@@ -42,6 +42,15 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
+    # BSL-1.0 (Boost): clipboard-win + error-code, pulled in by arboard's
+    # Windows clipboard backend. cargo-deny evaluates all target platforms by
+    # default, so these are license-checked on the Linux CI runner even though
+    # the Windows backend is never compiled here. Boost is a permissive,
+    # OSI-style license with no copyleft obligation.
+    "BSL-1.0",
+    # MIT-0 (MIT No Attribution): appears in OR-expressions for a few build/dev
+    # transitives (e.g. dunce). Strictly more permissive than MIT.
+    "MIT-0",
 ]
 confidence-threshold = 0.9
 
