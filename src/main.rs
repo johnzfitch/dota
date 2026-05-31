@@ -4,21 +4,21 @@
 //! real FIPS 203 ML-KEM-768 + X25519 encryption with ciphertext binding and
 //! passphrase commitment, and migrates legacy vaults forward on unlock.
 
-mod cli;
-mod crypto;
-pub mod security;
-mod tui;
-mod vault;
-
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use dota::cli::{self, Cli, Commands};
+use dota::{security, tui, vault};
 
 fn main() -> Result<()> {
-    // OS-level hardening: disable core dumps, ptrace, lock memory
     security::harden_process();
-    // Signal handlers: graceful shutdown to ensure ZeroizeOnDrop fires
     security::install_signal_handlers();
+
+    #[cfg(not(target_os = "linux"))]
+    eprintln!(
+        "Note: OS-level hardening is available only on Linux; \
+         relying on default protections on {}.",
+        std::env::consts::OS
+    );
 
     let args = Cli::parse();
 
@@ -33,8 +33,8 @@ fn main() -> Result<()> {
         Some(Commands::Set { name }) => {
             cli::commands::handle_set(args.vault, name)?;
         }
-        Some(Commands::Get { name }) => {
-            cli::commands::handle_get(args.vault, name)?;
+        Some(Commands::Get { name, copy }) => {
+            cli::commands::handle_get(args.vault, name, copy)?;
         }
         Some(Commands::List) => {
             cli::commands::handle_list(args.vault)?;

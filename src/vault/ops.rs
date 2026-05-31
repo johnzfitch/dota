@@ -42,14 +42,15 @@ const AES_GCM_TAG_LEN: usize = 16;
 const WRAPPED_MLKEM_PRIVATE_KEY_LEN: usize = 2400 + AES_GCM_TAG_LEN;
 const WRAPPED_X25519_PRIVATE_KEY_LEN: usize = 32 + AES_GCM_TAG_LEN;
 
-/// Default vault file path
+/// Default vault file path. Panics if the home directory is non-UTF-8.
 pub fn default_vault_path() -> String {
-    dirs::home_dir()
+    let path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".dota")
-        .join("vault.json")
-        .to_string_lossy()
-        .to_string()
+        .join("vault.json");
+    path.into_os_string()
+        .into_string()
+        .unwrap_or_else(|os| panic!("vault path is not valid UTF-8: {:?}", os))
 }
 
 /// Unlocked vault with decrypted keypairs
@@ -146,8 +147,8 @@ pub fn create_vault(passphrase: &str, vault_path: &str) -> Result<()> {
 
 /// Maximum vault file size accepted on disk.
 ///
-/// A real-world vault — KEM public key + wrapped private keys + a few
-/// thousand secrets — fits well under a megabyte. The cap exists to defeat
+/// A real-world vault -- KEM public key + wrapped private keys + a few
+/// thousand secrets -- fits well under a megabyte. The cap exists to defeat
 /// resource-exhaustion attacks where a hostile vault file (e.g. a vault
 /// planted in a shared directory) tries to make `serde_json` allocate
 /// unbounded memory before any cryptographic check has run.
@@ -170,14 +171,67 @@ pub(crate) fn reject_symlink_path(path: &Path, action: &str) -> Result<()> {
 
 /// Tighten an existing on-disk file to mode 0o600 (owner-only rw). No-op
 /// on non-Unix.
+///
+/// On Unix this opens the file with `O_NOFOLLOW`, verifies that what we
+/// hold is a single-link regular file owned by our euid, and `fchmod`s
+/// the file descriptor. The fd-based operation eliminates the path-based
+/// race a `chmod(2)` syscall would have between the metadata read and
+/// the permission set.
 #[cfg(unix)]
 pub(crate) fn restrict_file_to_owner_rw(path: &Path) -> Result<()> {
-    let mut perms = fs::metadata(path)
-        .with_context(|| format!("Failed to inspect permissions for {}", path.display()))?
-        .permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("Failed to secure file permissions for {}", path.display()))
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("Failed to open {} for hardening", path.display()))?;
+
+    let meta = file
+        .metadata()
+        .with_context(|| format!("Failed to fstat {}", path.display()))?;
+    verify_owned_single_link_file(&meta, path)?;
+
+    let rc = unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::Error::new(err))
+            .with_context(|| format!("Failed to secure file permissions for {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Reject anything that is not a regular file we own with exactly one hard
+/// link. Hard-link multiplicity is checked so that an `fchmod` / `ftruncate`
+/// / overwrite through a fd we hold cannot reach an attacker-planted second
+/// path to the same inode.
+#[cfg(unix)]
+pub(crate) fn verify_owned_single_link_file(meta: &fs::Metadata, path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !meta.file_type().is_file() {
+        anyhow::bail!(
+            "Refusing to operate on non-regular file: {}",
+            path.display()
+        );
+    }
+    if meta.nlink() != 1 {
+        anyhow::bail!(
+            "Refusing to operate on file with {} hard links: {}",
+            meta.nlink(),
+            path.display()
+        );
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        anyhow::bail!(
+            "Refusing to operate on file not owned by current uid {}: {}",
+            euid,
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -256,10 +310,13 @@ pub fn unlock_vault(passphrase: &str, vault_path: &str) -> Result<UnlockedVault>
             version
         ),
         version if version < VAULT_VERSION => {
-            eprintln!(
-                "Migrating vault from v{} to v{}...",
-                probe.version, VAULT_VERSION
-            );
+            use std::io::IsTerminal;
+            if std::io::stderr().is_terminal() {
+                eprintln!(
+                    "Migrating vault from v{} to v{}...",
+                    probe.version, VAULT_VERSION
+                );
+            }
             let vault = super::migration::upvault(&json, passphrase, vault_path)?;
             unlock_v7(vault, passphrase, vault_path)
         }
@@ -292,6 +349,7 @@ fn derive_master_key(passphrase: &str, vault: &Vault) -> Result<MasterKey> {
     derive_key(passphrase, &kdf_config)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     if let Some(ref stored_commitment) = vault.key_commitment {
         let expected = compute_v5_key_commitment(
@@ -302,13 +360,13 @@ pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) ->
         )?;
         if !security::constant_time_eq(stored_commitment, &expected) {
             anyhow::bail!(
-                "Key commitment mismatch — vault may have been tampered with \
+                "Key commitment mismatch -- vault may have been tampered with \
                  (KDF parameters or public keys were modified), or wrong passphrase"
             );
         }
     } else if vault.version >= V5_VAULT_VERSION {
         anyhow::bail!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         );
@@ -320,7 +378,7 @@ pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) ->
 pub(crate) fn verify_v6_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         )
@@ -328,7 +386,7 @@ pub(crate) fn verify_v6_key_commitment(vault: &Vault, master_key: &MasterKey) ->
     let expected = compute_v6_key_commitment(master_key, vault)?;
     if !security::constant_time_eq(stored_commitment, &expected) {
         anyhow::bail!(
-            "Key commitment mismatch — vault may have been tampered with \
+            "Key commitment mismatch -- vault may have been tampered with \
              (KDF parameters, suite, or public keys were modified), or wrong passphrase"
         );
     }
@@ -359,7 +417,7 @@ fn decrypt_vault_private_keys(
     // error so an observer cannot tell which arm failed first or distinguish
     // wrong-passphrase from corruption.
     const VAULT_DECRYPT_ERROR: &str =
-        "Vault decryption failed — vault file may be corrupted or tampered with";
+        "Vault decryption failed -- vault file may be corrupted or tampered with";
 
     let wrapping = derive_wrapping_keys_for_vault_version(vault.version, master_key)?;
     let mlkem_nonce: [u8; AES_GCM_NONCE_LEN] = vault
@@ -500,6 +558,10 @@ pub fn change_passphrase(unlocked: &mut UnlockedVault, new_passphrase: &str) -> 
 
     save_vault(unlocked)?;
 
+    if let Err(e) = super::migration::convert_backups_to_tombstone(&unlocked.path) {
+        eprintln!("Warning: tombstone conversion failed: {}", e);
+    }
+
     Ok(())
 }
 
@@ -592,10 +654,15 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
             },
         );
     }
-    // `secrets` Vec<(String, SecretString, ...)> drops here — each
+    // `secrets` Vec<(String, SecretString, ...)> drops here -- each
     // SecretString is zeroized via ZeroizeOnDrop.
 
     save_vault(unlocked)?;
+
+    if let Err(e) = super::migration::convert_backups_to_tombstone(&unlocked.path) {
+        eprintln!("Warning: tombstone conversion failed: {}", e);
+    }
+
     Ok(())
 }
 
@@ -646,12 +713,12 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
         )?,
     };
 
-    // Decrypt the secret value — wrap in SecretVec for zeroization
+    // Decrypt the secret value -- wrap in SecretVec for zeroization
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
     let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
 
     // Convert to String. On UTF-8 failure, `String::from_utf8` returns a
-    // `FromUtf8Error` that owns the original bytes — if we propagated that
+    // `FromUtf8Error` that owns the original bytes -- if we propagated that
     // error directly, the plaintext would survive (un-zeroized) inside the
     // anyhow chain. Catch the error, zeroize the recovered bytes, and surface
     // a content-free message instead.
@@ -721,12 +788,28 @@ pub(crate) fn save_vault_file(path: &str, vault: &Vault) -> Result<()> {
         .context("Failed to persist vault file")?;
 
     restrict_file_to_owner_rw(vault_path)?;
-
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    let _ = sync_dir(parent);
 
     Ok(())
+}
+
+/// fsync the parent directory after a rename so the rename itself is
+/// durable. Opens with `O_DIRECTORY | O_NOFOLLOW` so a symlinked parent
+/// is rejected at the syscall boundary.
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir)?;
+        dir.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(dir).and_then(|f| f.sync_all())
+    }
 }
 
 /// Create the vault parent directory with 0700 from inception on Unix to
@@ -755,22 +838,48 @@ fn secure_vault_directory(parent: &Path, parent_existed: bool) -> Result<()> {
     let mut perms = fs::metadata(parent)
         .context("Failed to inspect vault directory permissions")?
         .permissions();
+    let current_mode = perms.mode() & 0o7777;
     perms.set_mode(0o700);
 
     match fs::set_permissions(parent, perms) {
         Ok(()) => Ok(()),
         Err(err) if parent_existed && is_nonfatal_directory_permission_error(&err) => {
-            // Existing directories may live under temp/system-managed paths that
-            // reject chmod. Keep file hardening strict, but do not fail when we
-            // cannot redefine policy for a directory we did not create.
-            eprintln!(
-                "Warning: unable to tighten existing vault directory permissions for {}: {}",
-                parent.display(),
-                err
-            );
-            Ok(())
+            let already_strict = (current_mode & 0o077) == 0;
+            let sticky_world = current_mode & libc::S_ISVTX != 0 && (current_mode & 0o007) == 0o007;
+            if is_default_vault_parent(parent) || already_strict || sticky_world {
+                eprintln!(
+                    "Warning: vault directory {} retains mode 0o{:o} (chmod 0o700 failed: {}). \
+                     The vault file itself is mode 0o600.",
+                    parent.display(),
+                    current_mode,
+                    err
+                );
+                Ok(())
+            } else {
+                Err(err).with_context(|| {
+                    format!(
+                        "Refusing to write vault into a directory whose 0o700 permissions \
+                         cannot be enforced (current mode 0o{:o}): {}. Choose a directory \
+                         you control, or pre-create it with mode 0700.",
+                        current_mode,
+                        parent.display()
+                    )
+                })
+            }
         }
         Err(err) => Err(err).context("Failed to secure vault directory"),
+    }
+}
+
+#[cfg(unix)]
+fn is_default_vault_parent(parent: &Path) -> bool {
+    let default_parent = match dirs::home_dir() {
+        Some(home) => home.join(".dota"),
+        None => return false,
+    };
+    match (fs::canonicalize(parent), fs::canonicalize(&default_parent)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => parent == default_parent.as_path(),
     }
 }
 
@@ -797,7 +906,7 @@ const WRAP_LABEL_X25519_V7: &[u8] = b"dota-v7-wrap-x25519";
 
 /// Derive separate wrapping keys for ML-KEM and X25519 private key encryption.
 ///
-/// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
+/// Uses HKDF-Expand (no extract step -- the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
 fn derive_wrapping_keys_with_labels(
     mk: &MasterKey,
@@ -819,7 +928,7 @@ fn derive_wrapping_keys_with_labels(
         mlkem: AesKey::from_bytes(*mlkem_key),
         x25519: AesKey::from_bytes(*x25519_key),
     };
-    // Zeroize stack temporaries — data now lives inside AesKey (ZeroizeOnDrop)
+    // Zeroize stack temporaries -- data now lives inside AesKey (ZeroizeOnDrop)
     mlkem_key.zeroize();
     x25519_key.zeroize();
     std::hint::black_box(&mlkem_key);
@@ -827,10 +936,12 @@ fn derive_wrapping_keys_with_labels(
     Ok(keys)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn derive_wrapping_keys(mk: &MasterKey) -> Result<WrappingKeys> {
     derive_wrapping_keys_v5(mk)
 }
 
+#[cfg_attr(not(feature = "legacy-migration"), allow(dead_code))]
 pub(crate) fn derive_wrapping_keys_v5(mk: &MasterKey) -> Result<WrappingKeys> {
     derive_wrapping_keys_with_labels(mk, WRAP_LABEL_MLKEM_V5, WRAP_LABEL_X25519_V5)
 }
@@ -855,7 +966,7 @@ pub(crate) fn derive_wrapping_keys_for_vault_version(
     }
 }
 
-// ── Key commitment ──────────────────────────────────────────────────────────
+// -- Key commitment ----------------------------------------------------------
 
 /// Domain separator for the legacy v5 key commitment.
 const KEY_COMMITMENT_LABEL_V5: &[u8] = b"dota-v5-key-commitment";
@@ -889,7 +1000,7 @@ pub(crate) fn compute_v5_key_commitment(
     // hkdf 0.12 does not enable its `std` feature by default, so
     // `InvalidPrkLength` / `InvalidLength` do not implement `std::error::Error`
     // and cannot flow through `anyhow::Context`. Format the underlying error's
-    // `Display` into the anyhow message instead — same pattern as
+    // `Display` into the anyhow message instead -- same pattern as
     // `derive_wrapping_keys_with_labels`.
     let hk = Hkdf::<Sha256>::from_prk(master_key.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to initialize v5 key commitment HKDF: {}", e))?;
@@ -970,7 +1081,7 @@ pub(crate) fn compute_v7_key_commitment(master_key: &MasterKey, vault: &Vault) -
 fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         )
@@ -978,7 +1089,7 @@ fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()>
     let expected = compute_v7_key_commitment(master_key, vault)?;
     if !security::constant_time_eq(stored_commitment, &expected) {
         anyhow::bail!(
-            "Key commitment mismatch — vault may have been tampered with \
+            "Key commitment mismatch -- vault may have been tampered with \
              (KDF parameters, suite, or public keys were modified), or wrong passphrase"
         );
     }
@@ -1003,49 +1114,10 @@ pub(crate) fn compute_key_commitment(master_key: &MasterKey, vault: &Vault) -> R
     }
 }
 
-// ── Vault migration ─────────────────────────────────────────────────────────
-
-/// Migrate a vault file to the current format version.
-///
-/// - Versions < 4 are rejected (no vaults in the wild).
-/// - Version 4 → 5: adds key commitment, bumps version.
-/// - Version 5: already current, no-op.
-#[allow(dead_code)]
-pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
-    let json = read_vault_file(vault_path)?;
-    let mut vault: Vault = serde_json::from_str(&json).context("Failed to parse vault file")?;
-
-    if vault.version < MIN_VAULT_VERSION {
-        anyhow::bail!(
-            "Vault version {} is no longer supported. \
-             Please re-initialize with 'dota init'.",
-            vault.version
-        );
-    }
-    if vault.version >= VAULT_VERSION {
-        return Ok(()); // Already current
-    }
-
-    // v4 → v5: derive master key, compute commitment, save
-    let kdf_config = KdfConfig {
-        salt: vault.kdf.salt.clone(),
-        time_cost: vault.kdf.time_cost,
-        memory_cost: vault.kdf.memory_cost,
-        parallelism: vault.kdf.parallelism,
-    };
-    let master_key = derive_key(passphrase, &kdf_config)?;
-
-    vault.version = VAULT_VERSION;
-    vault.key_commitment = Some(compute_key_commitment(&master_key, &vault)?);
-    save_vault_file(vault_path, &vault)?;
-
-    Ok(())
-}
-
 /// Validate a secret name against the project-wide rules.
 ///
-/// Used at every point a secret name enters the system — direct CLI/TUI
-/// input *and* names parsed out of a vault file on unlock — so that no
+/// Used at every point a secret name enters the system -- direct CLI/TUI
+/// input *and* names parsed out of a vault file on unlock -- so that no
 /// downstream caller (including `list` rendering, shell-export naming,
 /// and informational output) ever sees a name carrying ASCII control
 /// characters, terminal escape sequences, bidi overrides, zero-width or
@@ -1700,6 +1772,7 @@ mod tests {
         assert_eq!(names, vec!["KEY1", "KEY2", "KEY3"]);
     }
 
+    #[cfg(feature = "legacy-migration")]
     #[test]
     fn test_v5_vault_rejects_stripped_key_commitment() {
         let tmp = NamedTempFile::new().unwrap();
@@ -1739,7 +1812,7 @@ mod tests {
         assert_eq!(raw["version"], 5);
         std::fs::write(vault_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
-        // Unlock must fail — missing commitment on a v5 vault is tamper evidence
+        // Unlock must fail -- missing commitment on a v5 vault is tamper evidence
         let err = unlock_vault("test-pass", vault_path).unwrap_err();
         assert!(
             err.to_string().contains("requires a key commitment"),
@@ -1865,7 +1938,7 @@ mod tests {
         let vault_path = tmp.path().to_str().unwrap();
 
         // Plant a JSON-shaped file that comfortably exceeds the cap. We do
-        // not need it to be a valid vault — the size check runs before any
+        // not need it to be a valid vault -- the size check runs before any
         // parsing.
         let oversized = vec![b'A'; (MAX_VAULT_FILE_BYTES + 1) as usize];
         fs::write(vault_path, oversized).unwrap();
@@ -1910,7 +1983,7 @@ mod tests {
         validate_secret_name("API_KEY").unwrap();
         validate_secret_name("aws/prod/access-token").unwrap();
         validate_secret_name("user@example.com").unwrap();
-        validate_secret_name("π-token").unwrap();
+        validate_secret_name("pi-token").unwrap();
     }
 
     #[test]
@@ -1930,17 +2003,17 @@ mod tests {
         assert!(validate_secret_name("API\nKEY").is_err());
         assert!(validate_secret_name("API\rKEY").is_err());
         assert!(validate_secret_name("API\x00KEY").is_err());
-        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC — terminal escape
+        assert!(validate_secret_name("API\x1bKEY").is_err()); // ESC -- terminal escape
         assert!(validate_secret_name("API\x7fKEY").is_err()); // DEL
     }
 
     #[test]
     fn validate_secret_name_rejects_bidi_and_format_overrides() {
-        // Right-to-Left Override — classic confusable-name attack.
+        // Right-to-Left Override -- classic confusable-name attack.
         assert!(validate_secret_name("API\u{202E}KEY").is_err());
         // Left-to-Right Override.
         assert!(validate_secret_name("API\u{202D}KEY").is_err());
-        // Zero-Width Space — invisible in `list` output.
+        // Zero-Width Space -- invisible in `list` output.
         assert!(validate_secret_name("API\u{200B}KEY").is_err());
         // Byte Order Mark / ZWNBSP.
         assert!(validate_secret_name("\u{FEFF}API_KEY").is_err());

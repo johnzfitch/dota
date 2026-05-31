@@ -7,36 +7,53 @@
 //! Security invariants:
 //! - Backup is created ONLY after successful in-memory migration (deferred backup)
 //! - All decrypted key material is wrapped in `Zeroizing<T>` for RAII cleanup
-//! - Wrong passphrase / corrupted data → error before any disk writes
+//! - Wrong passphrase / corrupted data -> error before any disk writes
 
 use super::format::{
-    EncryptedSecret, KemKeyPair, MigrationInfo, V5_VAULT_VERSION, V6_KEM_ALGORITHM,
-    V6_SECRET_ALGORITHM, V6_SUITE, V6_VAULT_VERSION, V6_X25519_ALGORITHM, V7_KEM_ALGORITHM,
+    EncryptedSecret, KemKeyPair, MigrationInfo, V6_SECRET_ALGORITHM, V7_KEM_ALGORITHM,
     V7_SECRET_ALGORITHM, V7_SUITE, V7_VAULT_VERSION, V7_X25519_ALGORITHM, VAULT_VERSION, Vault,
     X25519KeyPair,
 };
-use super::legacy::{VaultV1, VaultV2, VaultV3, VaultVersionProbe};
+#[cfg(feature = "legacy-migration")]
+use super::format::{
+    V5_VAULT_VERSION, V6_KEM_ALGORITHM, V6_SUITE, V6_VAULT_VERSION, V6_X25519_ALGORITHM,
+};
+use super::legacy::VaultVersionProbe;
+#[cfg(feature = "legacy-migration")]
+use super::legacy::{VaultV1, VaultV2, VaultV3};
 use super::ops::{
-    compute_key_commitment, derive_wrapping_keys, derive_wrapping_keys_v6, derive_wrapping_keys_v7,
-    save_vault_file, validate_kdf_params, verify_v5_key_commitment,
+    compute_key_commitment, derive_wrapping_keys_v6, derive_wrapping_keys_v7, save_vault_file,
+    validate_kdf_params,
 };
+#[cfg(feature = "legacy-migration")]
+use super::ops::{derive_wrapping_keys, verify_v5_key_commitment};
+#[cfg(feature = "legacy-migration")]
+use crate::crypto::AesKey;
+#[cfg(feature = "legacy-migration")]
 use crate::crypto::hybrid::{
-    hybrid_decapsulate_legacy, hybrid_decapsulate_v6, hybrid_encapsulate_legacy,
-    hybrid_encapsulate_v6, hybrid_encapsulate_v7,
+    hybrid_decapsulate_legacy, hybrid_encapsulate_legacy, hybrid_encapsulate_v6,
 };
+use crate::crypto::hybrid::{hybrid_decapsulate_v6, hybrid_encapsulate_v7};
+#[cfg(feature = "legacy-migration")]
 use crate::crypto::legacy_kyber::{self, LegacyKyberCiphertext, LegacyKyberPrivateKey};
 use crate::crypto::{
-    AesKey, KdfConfig, MasterKey, X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt,
-    derive_key, mlkem_generate_keypair,
+    KdfConfig, MasterKey, X25519PrivateKey, X25519PublicKey, aes_decrypt, aes_encrypt, derive_key,
+    mlkem_generate_keypair,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::Path;
 use zeroize::Zeroizing;
 
 const MAX_BACKUPS: usize = 5;
+
+/// Cap on retained tombstone files. Tombstones carry no key material or
+/// ciphertext (only public keys + KDF params + timestamps), so this bound
+/// exists purely to prevent unbounded directory growth.
+const MAX_TOMBSTONES: usize = 20;
 
 /// Migrate a vault from any older version to the current version.
 ///
@@ -66,7 +83,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
         bail!("Unknown vault version: 0");
     }
 
-    // Derive master key once — shared across all migration steps. Bound the
+    // Derive master key once -- shared across all migration steps. Bound the
     // KDF parameters before invoking Argon2 so a poisoned legacy vault cannot
     // force unbounded memory/CPU consumption during migration.
     let kdf_params = parse_kdf_params(original_json)?;
@@ -84,6 +101,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
 
     // Run the stepwise upvault chain. All paths terminate at v7.
     let vault = match probe.version {
+        #[cfg(feature = "legacy-migration")]
         1 => {
             let v1: VaultV1 =
                 serde_json::from_str(original_json).context("Failed to parse v1 vault")?;
@@ -94,6 +112,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v6 = upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?;
             upvault_v6_to_v7(v6, probe.version, &migration_path, &master_key)?
         }
+        #[cfg(feature = "legacy-migration")]
         2 => {
             let v2: VaultV2 =
                 serde_json::from_str(original_json).context("Failed to parse v2 vault")?;
@@ -103,6 +122,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v6 = upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?;
             upvault_v6_to_v7(v6, probe.version, &migration_path, &master_key)?
         }
+        #[cfg(feature = "legacy-migration")]
         3 => {
             let v3: VaultV3 =
                 serde_json::from_str(original_json).context("Failed to parse v3 vault")?;
@@ -111,6 +131,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v6 = upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?;
             upvault_v6_to_v7(v6, probe.version, &migration_path, &master_key)?
         }
+        #[cfg(feature = "legacy-migration")]
         4 => {
             let v4: Vault =
                 serde_json::from_str(original_json).context("Failed to parse v4 vault")?;
@@ -118,6 +139,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
             let v6 = upvault_v5_to_v6(v5, probe.version, &migration_path, &master_key)?;
             upvault_v6_to_v7(v6, probe.version, &migration_path, &master_key)?
         }
+        #[cfg(feature = "legacy-migration")]
         5 => {
             let v5: Vault =
                 serde_json::from_str(original_json).context("Failed to parse v5 vault")?;
@@ -129,26 +151,35 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
                 serde_json::from_str(original_json).context("Failed to parse v6 vault")?;
             upvault_v6_to_v7(v6, probe.version, &migration_path, &master_key)?
         }
+        #[cfg(not(feature = "legacy-migration"))]
+        v @ 1..=5 => bail!(
+            "Vault v{} requires the legacy-migration feature. Rebuild dota with \
+             `cargo install --features legacy-migration` (or `cargo build \
+             --features legacy-migration`) to migrate pre-v6 vaults.",
+            v
+        ),
         _ => bail!("Unsupported vault version: {}", probe.version),
     };
 
-    // === All in-memory migration succeeded — now persist ===
     create_backup(vault_path)?;
     save_vault_file(vault_path, &vault)?;
 
-    eprintln!(
-        "Migration complete: v{} → v{}",
-        probe.version, VAULT_VERSION
-    );
+    if std::io::stderr().is_terminal() {
+        eprintln!(
+            "Migration complete: v{} -> v{}",
+            probe.version, VAULT_VERSION
+        );
+    }
 
     Ok(vault)
 }
 
 // ---------------------------------------------------------------------------
-// Step functions: each converts vN → vN+1
+// Step functions: each converts vN -> vN+1
 // ---------------------------------------------------------------------------
 
-/// v1 → v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
+/// v1 -> v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
+#[cfg(feature = "legacy-migration")]
 fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     // v1 uses master key directly as AES key for private key wrapping
     let wrapping_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -242,7 +273,8 @@ fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     })
 }
 
-/// v2 → v3: Restructure flat fields into nested structs (no crypto changes)
+/// v2 -> v3: Restructure flat fields into nested structs (no crypto changes)
+#[cfg(feature = "legacy-migration")]
 fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     Ok(VaultV3 {
         version: 3,
@@ -264,7 +296,8 @@ fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     })
 }
 
-/// v3 → v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
+/// v3 -> v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
+#[cfg(feature = "legacy-migration")]
 fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     // v3 uses master key directly as AES key
     let direct_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -325,9 +358,10 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     })
 }
 
-/// v4 → v5: Add the legacy key commitment and anti-rollback floor.
+/// v4 -> v5: Add the legacy key commitment and anti-rollback floor.
 ///
 /// This is an internal staging step used only in memory before the final v6 re-key.
+#[cfg(feature = "legacy-migration")]
 fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
     v4.version = V5_VAULT_VERSION;
     v4.min_version = V5_VAULT_VERSION;
@@ -336,8 +370,9 @@ fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
     Ok(v4)
 }
 
-/// v5 → v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
+/// v5 -> v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
 /// rotate both asymmetric keypairs, and re-encrypt everything under real v6 semantics.
+#[cfg(feature = "legacy-migration")]
 fn upvault_v5_to_v6(
     v5: Vault,
     original_version: u32,
@@ -382,9 +417,11 @@ fn upvault_v5_to_v6(
 
     let mut plaintext_secrets = Vec::with_capacity(v5.secrets.len());
     for (name, secret) in &v5.secrets {
+        super::ops::validate_secret_name(name)
+            .with_context(|| format!("Invalid secret name in legacy vault: {:?}", name))?;
         if secret.algorithm != "hybrid-mlkem768-x25519" {
             bail!(
-                "Unsupported legacy secret algorithm for '{}': {}",
+                "Unsupported legacy secret algorithm for {:?}: {}",
                 name,
                 secret.algorithm
             );
@@ -393,22 +430,14 @@ fn upvault_v5_to_v6(
         let legacy_kem_ciphertext = LegacyKyberCiphertext::from_bytes(
             secret.kem_ciphertext.clone(),
         )
-        .with_context(|| {
-            format!(
-                "Invalid legacy Kyber ciphertext length for secret '{}'",
-                name
-            )
-        })?;
+        .with_context(|| format!("Invalid legacy Kyber ciphertext for secret {:?}", name))?;
         let x25519_ephemeral_public = X25519PublicKey::from_bytes(
             secret
                 .x25519_ephemeral_public
                 .as_slice()
                 .try_into()
                 .with_context(|| {
-                    format!(
-                        "Invalid X25519 ephemeral public key length for secret '{}'",
-                        name
-                    )
+                    format!("Invalid X25519 ephemeral public key for secret {:?}", name)
                 })?,
         );
         let aes_key = hybrid_decapsulate_legacy(
@@ -421,7 +450,7 @@ fn upvault_v5_to_v6(
             .nonce
             .as_slice()
             .try_into()
-            .with_context(|| format!("Invalid nonce length for secret '{}'", name))?;
+            .with_context(|| format!("Invalid nonce length for secret {:?}", name))?;
         let plaintext = Zeroizing::new(aes_decrypt(&aes_key, &secret.ciphertext, &nonce)?);
         plaintext_secrets.push((name.clone(), plaintext, secret.created, secret.modified));
     }
@@ -481,7 +510,7 @@ fn upvault_v5_to_v6(
     Ok(v6)
 }
 
-/// v6 → v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
+/// v6 -> v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
 ///
 /// Decrypts all secrets under v6 hybrid semantics, generates fresh keypairs,
 /// and re-encrypts under v7 TC-HKEM with passphrase commitment.
@@ -532,23 +561,25 @@ fn upvault_v6_to_v7(
     // Decrypt all v6 secrets
     let mut plaintext_secrets = Vec::with_capacity(v6.secrets.len());
     for (name, secret) in &v6.secrets {
+        super::ops::validate_secret_name(name)
+            .with_context(|| format!("Invalid secret name in v6 vault: {:?}", name))?;
         if secret.algorithm != V6_SECRET_ALGORITHM {
             bail!(
-                "Unsupported v6 secret algorithm for '{}': {}",
+                "Unsupported v6 secret algorithm for {:?}: {}",
                 name,
                 secret.algorithm
             );
         }
 
         let kem_ct = crate::crypto::MlKemCiphertext::from_bytes(secret.kem_ciphertext.clone())
-            .with_context(|| format!("Invalid ML-KEM ciphertext for secret '{}'", name))?;
+            .with_context(|| format!("Invalid ML-KEM ciphertext for secret {:?}", name))?;
 
         let x25519_eph_pk = X25519PublicKey::from_bytes(
             secret
                 .x25519_ephemeral_public
                 .as_slice()
                 .try_into()
-                .with_context(|| format!("Invalid X25519 ephemeral key for secret '{}'", name))?,
+                .with_context(|| format!("Invalid X25519 ephemeral key for secret {:?}", name))?,
         );
 
         let aes_key = hybrid_decapsulate_v6(
@@ -561,7 +592,7 @@ fn upvault_v6_to_v7(
             .nonce
             .as_slice()
             .try_into()
-            .with_context(|| format!("Invalid nonce for secret '{}'", name))?;
+            .with_context(|| format!("Invalid nonce for secret {:?}", name))?;
         let plaintext = Zeroizing::new(aes_decrypt(&aes_key, &secret.ciphertext, &nonce)?);
         plaintext_secrets.push((name.clone(), plaintext, secret.created, secret.modified));
     }
@@ -626,14 +657,15 @@ fn upvault_v6_to_v7(
 }
 
 // ---------------------------------------------------------------------------
-// Backup management
+// Backup + tombstone management (H3)
 // ---------------------------------------------------------------------------
 
-/// Create a backup of the vault file before overwriting with migrated version.
-///
-/// Uses timestamped filenames with a cap of MAX_BACKUPS to prevent accumulation.
-/// Only called after in-memory migration has fully succeeded.
+/// Create a backup of the vault file before overwriting with the migrated
+/// version. Timestamped filename, capped at `MAX_BACKUPS`. Only called
+/// after the in-memory migration has fully succeeded.
 fn create_backup(vault_path: &str) -> Result<()> {
+    use std::io::Write;
+
     let path = Path::new(vault_path);
     if !path.exists() {
         return Ok(()); // Nothing to back up
@@ -653,23 +685,180 @@ fn create_backup(vault_path: &str) -> Result<()> {
         existing_backups.remove(0);
     }
 
-    // Create new backup with timestamp
+    // Source bytes -- go through the same bounded reader that unlock uses
+    // so a planted multi-gigabyte vault cannot exhaust memory at backup
+    // time either.
+    let source_bytes = super::ops::read_vault_file(vault_path)?;
+
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
     let backup_name = format!("{}.backup.{}.{}", stem, timestamp, ext);
     let backup_path = parent.join(&backup_name);
-
     super::ops::reject_symlink_path(&backup_path, "write backup")?;
 
-    fs::copy(vault_path, &backup_path)
-        .with_context(|| format!("Failed to create vault backup at {}", backup_path.display()))?;
-
-    // Backups carry every cryptographic byte the live vault holds. fs::copy
-    // preserves the source mode on Unix; locking the backup to 0o600
-    // explicitly defends against a permissive source mode bleeding through.
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".vault.backup.tmp-")
+        .tempfile_in(parent)
+        .context("Failed to create temporary backup file")?;
+    tmp.write_all(source_bytes.as_bytes())
+        .context("Failed to write backup data")?;
+    tmp.as_file()
+        .sync_all()
+        .context("Failed to sync backup data")?;
+    tmp.persist(&backup_path)
+        .context("Failed to persist backup file")?;
     super::ops::restrict_file_to_owner_rw(&backup_path)?;
+    let _ = super::ops::sync_dir(parent);
 
-    eprintln!("Backup saved: {}", backup_path.display());
+    if std::io::stderr().is_terminal() {
+        eprintln!("Backup saved: {}", backup_path.display());
+    }
     Ok(())
+}
+
+/// Convert `vault.backup.*.json` files next to `vault_path` into
+/// `vault.tombstone.<ts>.json` shells. Tombstones retain version, KDF
+/// params, public keys, suite, and timestamps; private key wraps, key
+/// commitment, and secrets are nulled. Backups are zero-overwritten then
+/// unlinked.
+pub(crate) fn convert_backups_to_tombstone(vault_path: &str) -> Result<()> {
+    use serde_json::Value;
+    use std::io::Write;
+
+    let path = Path::new(vault_path);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("vault");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
+
+    let backups = find_backups(parent, stem, ext)?;
+    if backups.is_empty() {
+        return Ok(());
+    }
+
+    for backup_name in &backups {
+        let backup_path = parent.join(backup_name);
+        let bytes = match super::ops::read_vault_file(
+            backup_path
+                .to_str()
+                .context("backup path is not valid UTF-8")?,
+        ) {
+            Ok(b) => b,
+            // Don't let a single malformed backup wedge rotation hygiene.
+            Err(_) => {
+                let _ = fs::remove_file(&backup_path);
+                continue;
+            }
+        };
+
+        let mut tombstone: Value = match serde_json::from_str(&bytes) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = fs::remove_file(&backup_path);
+                continue;
+            }
+        };
+
+        // If the backup parsed as valid JSON but wasn't an object, we
+        // cannot safely scrub it field-by-field -- emitting it as-is would
+        // defeat the H3 guarantee. Delete it outright and move on. The
+        // same fate as a JSON parse error.
+        let Some(obj) = tombstone.as_object_mut() else {
+            let _ = fs::remove_file(&backup_path);
+            continue;
+        };
+
+        // Scrub wrapped private keys and the key commitment.
+        if let Some(kem) = obj.get_mut("kem").and_then(Value::as_object_mut) {
+            kem.insert("encrypted_private_key".into(), Value::Null);
+            kem.insert("private_key_nonce".into(), Value::Null);
+        }
+        if let Some(x) = obj.get_mut("x25519").and_then(Value::as_object_mut) {
+            x.insert("encrypted_private_key".into(), Value::Null);
+            x.insert("private_key_nonce".into(), Value::Null);
+        }
+        obj.insert("key_commitment".into(), Value::Null);
+        // Encrypted secrets: stripped wholesale. Names lived in the backup
+        // JSON as plaintext keys (see M4); the tombstone drops those too.
+        obj.insert("secrets".into(), Value::Object(serde_json::Map::new()));
+        obj.insert(
+            "tombstoned_at".into(),
+            Value::String(Utc::now().to_rfc3339()),
+        );
+        obj.insert("tombstoned_from".into(), Value::String(backup_name.clone()));
+
+        let ts = Utc::now().format("%Y%m%d_%H%M%S%f");
+        let tombstone_name = format!("{}.tombstone.{}.{}", stem, ts, ext);
+        let tombstone_path = parent.join(&tombstone_name);
+        super::ops::reject_symlink_path(&tombstone_path, "write tombstone")?;
+
+        let tombstone_json =
+            serde_json::to_string_pretty(&tombstone).context("Failed to serialize tombstone")?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".vault.tombstone.tmp-")
+            .tempfile_in(parent)
+            .context("Failed to create temporary tombstone file")?;
+        tmp.write_all(tombstone_json.as_bytes())
+            .context("Failed to write tombstone data")?;
+        tmp.as_file()
+            .sync_all()
+            .context("Failed to sync tombstone data")?;
+        tmp.persist(&tombstone_path)
+            .context("Failed to persist tombstone")?;
+        super::ops::restrict_file_to_owner_rw(&tombstone_path)?;
+
+        zeroize_then_unlink(&backup_path);
+    }
+
+    prune_tombstones(parent, stem, ext)?;
+    let _ = super::ops::sync_dir(parent);
+    Ok(())
+}
+
+/// Zero out the file's contents through a fd we hold under verified
+/// identity, then unlink it. All policy decisions are made against the
+/// fstat of the opened fd; no path-based decisions are made after the
+/// open. Non-Unix falls back to truncate + unlink with no identity
+/// check (no `O_NOFOLLOW` / `nlink` / `uid` semantics there to enforce).
+fn zeroize_then_unlink(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let Ok(mut f) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+        else {
+            let _ = fs::remove_file(path);
+            return;
+        };
+        let Ok(meta) = f.metadata() else {
+            let _ = fs::remove_file(path);
+            return;
+        };
+        if super::ops::verify_owned_single_link_file(&meta, path).is_err() {
+            let _ = fs::remove_file(path);
+            return;
+        }
+        let len = meta.len();
+        if len > 0
+            && f.seek(SeekFrom::Start(0)).is_ok()
+            && f.write_all(&vec![0u8; len as usize]).is_ok()
+        {
+            let _ = f.sync_all();
+            let rc = unsafe { libc::ftruncate(f.as_raw_fd(), 0) };
+            let _ = rc;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(f) = fs::OpenOptions::new().write(true).truncate(true).open(path) {
+            let _ = f.sync_all();
+        }
+    }
+    let _ = fs::remove_file(path);
 }
 
 /// Find existing backup files matching the pattern `{stem}.backup.*.{ext}`
@@ -691,6 +880,37 @@ fn find_backups(dir: &Path, stem: &str, ext: &str) -> Result<Vec<String>> {
     Ok(backups)
 }
 
+/// Find existing tombstone files matching `{stem}.tombstone.*.{ext}`.
+fn find_tombstones(dir: &Path, stem: &str, ext: &str) -> Result<Vec<String>> {
+    let prefix = format!("{}.tombstone.", stem);
+    let suffix = format!(".{}", ext);
+
+    let mut tombstones = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(&prefix)
+                && name.ends_with(&suffix)
+            {
+                tombstones.push(name.to_string());
+            }
+        }
+    }
+    Ok(tombstones)
+}
+
+fn prune_tombstones(parent: &Path, stem: &str, ext: &str) -> Result<()> {
+    let mut tombstones = find_tombstones(parent, stem, ext)?;
+    tombstones.sort();
+    while tombstones.len() > MAX_TOMBSTONES {
+        if let Some(oldest) = tombstones.first() {
+            let _ = fs::remove_file(parent.join(oldest));
+        }
+        tombstones.remove(0);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -705,7 +925,7 @@ fn parse_kdf_params(json: &str) -> Result<super::format::KdfParams> {
     Ok(probe.kdf)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-migration"))]
 mod tests {
     use super::*;
     use crate::crypto::hybrid::hybrid_decapsulate_v7;

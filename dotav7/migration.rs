@@ -7,7 +7,7 @@
 //! Security invariants:
 //! - Backup is created ONLY after successful in-memory migration (deferred backup)
 //! - All decrypted key material is wrapped in `Zeroizing<T>` for RAII cleanup
-//! - Wrong passphrase / corrupted data → error before any disk writes
+//! - Wrong passphrase / corrupted data -> error before any disk writes
 
 use super::format::{
     EncryptedSecret, KemKeyPair, MigrationInfo, V5_VAULT_VERSION, V6_KEM_ALGORITHM,
@@ -66,7 +66,7 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
         bail!("Unknown vault version: 0");
     }
 
-    // Derive master key once — shared across all migration steps
+    // Derive master key once -- shared across all migration steps
     let kdf_params = parse_kdf_params(original_json)?;
     let master_key = derive_key(passphrase, &kdf_params)?;
 
@@ -123,12 +123,12 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
         _ => bail!("Unsupported vault version: {}", probe.version),
     };
 
-    // === All in-memory migration succeeded — now persist ===
+    // === All in-memory migration succeeded -- now persist ===
     create_backup(vault_path)?;
     save_vault_file(vault_path, &vault)?;
 
     eprintln!(
-        "Migration complete: v{} → v{}",
+        "Migration complete: v{} -> v{}",
         probe.version, VAULT_VERSION
     );
 
@@ -136,10 +136,10 @@ pub fn upvault(original_json: &str, passphrase: &str, vault_path: &str) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// Step functions: each converts vN → vN+1
+// Step functions: each converts vN -> vN+1
 // ---------------------------------------------------------------------------
 
-/// v1 → v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
+/// v1 -> v2: Add ML-KEM-768, re-encrypt secrets with hybrid KEM
 fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     // v1 uses master key directly as AES key for private key wrapping
     let wrapping_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -233,7 +233,7 @@ fn upvault_v1(v1: VaultV1, master_key: &MasterKey) -> Result<VaultV2> {
     })
 }
 
-/// v2 → v3: Restructure flat fields into nested structs (no crypto changes)
+/// v2 -> v3: Restructure flat fields into nested structs (no crypto changes)
 fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     Ok(VaultV3 {
         version: 3,
@@ -255,7 +255,7 @@ fn upvault_v2(v2: VaultV2) -> Result<VaultV3> {
     })
 }
 
-/// v3 → v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
+/// v3 -> v4: Re-wrap private keys with HKDF-derived wrapping keys (key separation)
 fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     // v3 uses master key directly as AES key
     let direct_key = AesKey::from_bytes(*master_key.as_bytes());
@@ -316,7 +316,7 @@ fn upvault_v3(v3: VaultV3, master_key: &MasterKey) -> Result<Vault> {
     })
 }
 
-/// v4 → v5: Add the legacy key commitment and anti-rollback floor.
+/// v4 -> v5: Add the legacy key commitment and anti-rollback floor.
 ///
 /// This is an internal staging step used only in memory before the final v6 re-key.
 fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
@@ -327,7 +327,7 @@ fn upvault_v4(mut v4: Vault, master_key: &MasterKey) -> Result<Vault> {
     Ok(v4)
 }
 
-/// v5 → v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
+/// v5 -> v6: verify the legacy commitment, decrypt under legacy Kyber semantics,
 /// rotate both asymmetric keypairs, and re-encrypt everything under real v6 semantics.
 fn upvault_v5_to_v6(
     v5: Vault,
@@ -472,7 +472,7 @@ fn upvault_v5_to_v6(
     Ok(v6)
 }
 
-/// v6 → v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
+/// v6 -> v7: Re-key and re-encrypt under TC-HKEM (ciphertext-bound + mk-committed).
 ///
 /// Decrypts all secrets under v6 hybrid semantics, generates fresh keypairs,
 /// and re-encrypts under v7 TC-HKEM with passphrase commitment.

@@ -4,7 +4,8 @@
 //! hardened parameters: t=3, m=65536 KiB (64 MiB), p=4
 
 use anyhow::Result;
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
+use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -45,12 +46,11 @@ impl Default for KdfConfig {
     }
 }
 
-/// Generate a random salt for KDF
+/// Generate a 32-byte random salt for KDF input.
 pub fn generate_salt() -> Vec<u8> {
-    SaltString::generate(&mut OsRng)
-        .as_str()
-        .as_bytes()
-        .to_vec()
+    let mut salt = vec![0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    salt
 }
 
 /// Derive master key from passphrase using Argon2id
@@ -72,7 +72,7 @@ pub fn derive_key(passphrase: &str, config: &KdfConfig) -> Result<MasterKey> {
         .map_err(|e| anyhow::anyhow!("Argon2 derivation failed: {}", e))?;
 
     let key = MasterKey(output);
-    // Zeroize the stack buffer — the data now lives inside MasterKey
+    // Zeroize the stack buffer -- the data now lives inside MasterKey
     // (which has ZeroizeOnDrop). Use black_box to prevent the compiler
     // from eliding this write.
     output.zeroize();

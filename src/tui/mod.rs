@@ -1,9 +1,8 @@
 //! Minimal interactive vault shell used as the default unlock mode.
-//! The ratatui module remains in-tree, but the shipped unlock path currently
-//! enters this text-mode shell.
+//! Text-mode line shell -- no curses/ratatui dependency.
 
-pub mod app;
-
+use crate::cli::clipboard;
+use crate::cli::commands::read_passphrase;
 use crate::security::{SecretString, shutdown_requested};
 use crate::vault::ops::{
     get_secret, list_secrets, remove_secret, set_secret, unlock_vault, validate_secret_name,
@@ -16,9 +15,9 @@ use zeroize::Zeroize;
 
 /// Launch the TUI application
 pub fn launch_tui(vault_path: String) -> Result<()> {
-    // Wrap passphrase in SecretString — persists for session lifetime but
+    // Wrap passphrase in SecretString -- persists for session lifetime but
     // will be zeroized when this function returns (including on signal exit).
-    let passphrase = SecretString::new(prompt_password("Vault passphrase: ")?);
+    let passphrase = read_passphrase("Vault passphrase: ")?;
     let mut unlocked = unlock_vault(passphrase.expose(), &vault_path)?;
 
     println!("dota interactive mode");
@@ -55,7 +54,10 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 println!("Commands:");
                 println!("  help                          Show this help");
                 println!("  list                          List secret names");
-                println!("  get <name>                    Show secret value");
+                println!("  get <name>                    Show secret value (echoes to stdout)");
+                println!(
+                    "  copy <name>                   Copy secret to clipboard, auto-clear after timeout"
+                );
                 println!(
                     "  set <name>                    Set/update secret (value prompted, never echoed)"
                 );
@@ -77,6 +79,21 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             }
             "get" => match named_op(&mut parts, "get", |name| {
                 get_secret(&unlocked, name).map(|value| println!("{}", value.expose()))
+            }) {
+                Ok(()) => {}
+                Err(e) => println!("error: {}", e),
+            },
+            "copy" => match named_op(&mut parts, "copy", |name| {
+                let value = get_secret(&unlocked, name)?;
+                let timeout = clipboard::clear_timeout_from_env();
+                eprintln!(
+                    "Copied '{}' to clipboard. Will clear in {}s (Ctrl-C to clear now).",
+                    name,
+                    timeout.as_secs()
+                );
+                clipboard::copy_with_autoclear(&value, timeout)?;
+                eprintln!("Clipboard cleared.");
+                Ok(())
             }) {
                 Ok(()) => {}
                 Err(e) => println!("error: {}", e),
@@ -117,7 +134,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
             },
             "info" => {
                 println!("Vault Information");
-                println!("─────────────────");
+                println!("-----------------");
                 println!("Location:      {}", vault_path);
                 println!("Version:       {}", unlocked.vault.version);
                 println!(
@@ -133,7 +150,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 );
                 println!();
                 println!("Cryptography");
-                println!("─────────────────");
+                println!("-----------------");
                 println!("KEM:           {}", unlocked.vault.kem.algorithm);
                 println!("X25519:        {}", unlocked.vault.x25519.algorithm);
                 println!(
@@ -148,7 +165,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                 if let Some(ref info) = unlocked.vault.migrated_from {
                     println!();
                     println!("Migration");
-                    println!("─────────────────");
+                    println!("-----------------");
                     println!("Original version: v{}", info.original_version);
                     println!(
                         "Migrated at:      {}",
@@ -160,7 +177,7 @@ pub fn launch_tui(vault_path: String) -> Result<()> {
                             .iter()
                             .map(|v| format!("v{}", v))
                             .collect::<Vec<_>>()
-                            .join(" → ")
+                            .join(" -> ")
                     );
                 }
             }

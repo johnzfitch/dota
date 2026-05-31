@@ -11,7 +11,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// ── Secret memory types ─────────────────────────────────────────────────────
+// -- Secret memory types -----------------------------------------------------
 
 /// A `String` that is zeroized on drop.
 ///
@@ -71,7 +71,7 @@ impl fmt::Debug for SecretVec {
     }
 }
 
-// ── OS-level hardening (raw FFI — no libc crate dependency) ─────────────────
+// -- OS-level hardening (raw FFI -- no libc crate dependency) -----------------
 
 // Linux constants (stable ABI)
 #[cfg(target_os = "linux")]
@@ -117,7 +117,7 @@ pub fn harden_process() {
 fn harden_linux() {
     use linux::*;
     unsafe {
-        // 1. Disable core dumps — prevents secrets from being written to disk
+        // 1. Disable core dumps -- prevents secrets from being written to disk
         //    on crash or signal-induced core generation.
         let rlim = Rlimit {
             rlim_cur: 0,
@@ -127,19 +127,19 @@ fn harden_linux() {
             eprintln!("warning: failed to disable core dumps");
         }
 
-        // 2. Mark process as non-dumpable — blocks ptrace attach and
+        // 2. Mark process as non-dumpable -- blocks ptrace attach and
         //    /proc/self/mem reads by same-UID processes.
         if prctl(PR_SET_DUMPABLE, 0i32) != 0 {
             eprintln!("warning: failed to set PR_SET_DUMPABLE");
         }
 
-        // 3. Lock current and future pages into RAM — prevents swap-to-disk.
+        // 3. Lock current and future pages into RAM -- prevents swap-to-disk.
         //    Requires CAP_IPC_LOCK; silently ignore EPERM.
         let _ = mlockall(MCL_CURRENT | MCL_FUTURE);
     }
 }
 
-// ── Signal handling ─────────────────────────────────────────────────────────
+// -- Signal handling ---------------------------------------------------------
 
 /// Global flag set by signal handlers to request graceful shutdown.
 /// Checked by the TUI event loop and long-running operations.
@@ -166,7 +166,7 @@ pub fn install_signal_handlers() {
 #[cfg(target_os = "linux")]
 extern "C" fn signal_handler(sig: std::os::raw::c_int) {
     if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-        // Second signal — restore default action and re-raise for immediate exit.
+        // Second signal -- restore default action and re-raise for immediate exit.
         unsafe {
             linux::signal(sig, linux::SIG_DFL);
             linux::raise(sig);
@@ -181,11 +181,11 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
 
-// ── Constant-time utilities ─────────────────────────────────────────────────
+// -- Constant-time utilities -------------------------------------------------
 
 /// Constant-time byte-slice equality comparison.
 ///
-/// Returns `false` if lengths differ. The length check is not secret —
+/// Returns `false` if lengths differ. The length check is not secret --
 /// length is observable elsewhere (allocations, I/O). On equal-length
 /// inputs, every byte is visited and `std::hint::black_box` runs on the
 /// running accumulator each iteration to prevent the optimizer from

@@ -20,7 +20,7 @@ class MLKEMParams:
     """ML-KEM-768 parameters from FIPS 203."""
     n: int = 256       # Polynomial ring dimension (Z_q[X]/(X^n + 1))
     k: int = 3         # Module rank (768 = 256 * 3)
-    q: int = 3329      # Modulus (prime, NTT-friendly: q ≡ 1 mod 2n)
+    q: int = 3329      # Modulus (prime, NTT-friendly: q ? 1 mod 2n)
     eta1: int = 2      # CBD parameter for secret/error (keygen)
     eta2: int = 2      # CBD parameter for error (encaps)
     du: int = 10       # Compression bits for u (ciphertext component)
@@ -48,12 +48,12 @@ def verify_mlkem_params():
 
     results.append(("q = 3329 is prime", is_prime(p.q)))
 
-    # Verify q ≡ 1 (mod n) for NTT compatibility
+    # Verify q ? 1 (mod n) for NTT compatibility
     # ML-KEM uses negacyclic NTT: maps Z_q[X]/(X^256+1) to 128 degree-1
     # components via 256th roots of unity. Requires n | (q-1).
     # 3329 - 1 = 3328 = 256 * 13, so 256 | 3328. Correct.
     ntt_compat = (p.q - 1) % p.n == 0
-    results.append((f"(q-1) mod n = {(p.q-1) % p.n} → 256th roots of unity exist [NTT]", ntt_compat))
+    results.append((f"(q-1) mod n = {(p.q-1) % p.n} -> 256th roots of unity exist [NTT]", ntt_compat))
 
     # Verify public key size: pk = 384k + 32 bytes
     expected_pk = 384 * p.k + 32
@@ -69,39 +69,39 @@ def verify_mlkem_params():
 
     # Core Security Estimate: Module-LWE hardness
     # The best known attack is the primal lattice attack via BKZ
-    # Security ≈ solving SVP in dimension d with block size β
+    # Security ~= solving SVP in dimension d with block size beta
     #
     # For ML-KEM-768 (NIST Level 3):
     #   - Classical bit security: ~183 bits (primal attack)
     #   - Quantum bit security: ~166 bits (Grover-enhanced BKZ)
-    #   - NIST target: ≥ 192-bit classical (Level 3 = AES-192 equivalent)
+    #   - NIST target: >= 192-bit classical (Level 3 = AES-192 equivalent)
     #
     # The "Core-SVP" model gives a conservative lower bound.
-    # We estimate δ_0 (root Hermite factor) needed to break MLWE:
+    # We estimate delta_0 (root Hermite factor) needed to break MLWE:
 
     # Module dimension for ML-KEM-768: m = n * k = 768
     module_dim = p.n * p.k
 
-    # Gaussian width parameter σ for CBD(η) = sqrt(η/2)
+    # Gaussian width parameter sigma for CBD(?) = sqrt(?/2)
     sigma = math.sqrt(p.eta1 / 2)
 
-    # Root Hermite factor δ for the secret distribution
-    # For Module-LWE with these parameters, the BKZ block size β satisfies:
-    # β ≈ module_dim / (ln(q/σ) / ln(δ))
-    # And classical security ≈ 0.292 * β (Core-SVP model)
+    # Root Hermite factor delta for the secret distribution
+    # For Module-LWE with these parameters, the BKZ block size beta satisfies:
+    # beta ~= module_dim / (ln(q/sigma) / ln(delta))
+    # And classical security ~= 0.292 * beta (Core-SVP model)
 
     # NIST's security estimate for ML-KEM-768 (from specification):
     nist_classical_bits = 183  # Core-SVP classical
     nist_quantum_bits = 166    # Core-SVP quantum
 
     results.append((f"Module dimension n*k = {module_dim}", module_dim == 768))
-    results.append((f"NIST classical security ≥ 128 bits ({nist_classical_bits})", nist_classical_bits >= 128))
-    results.append((f"NIST quantum security ≥ 128 bits ({nist_quantum_bits})", nist_quantum_bits >= 128))
+    results.append((f"NIST classical security >= 128 bits ({nist_classical_bits})", nist_classical_bits >= 128))
+    results.append((f"NIST quantum security >= 128 bits ({nist_quantum_bits})", nist_quantum_bits >= 128))
 
     # Decryption failure probability
-    # For ML-KEM-768: Pr[decryption failure] ≈ 2^{-164}
+    # For ML-KEM-768: Pr[decryption failure] ~= 2^{-164}
     failure_prob_log2 = -164
-    results.append((f"Decryption failure prob ≈ 2^{{{failure_prob_log2}}}", failure_prob_log2 < -128))
+    results.append((f"Decryption failure prob ~= 2^{{{failure_prob_log2}}}", failure_prob_log2 < -128))
 
     return "ML-KEM-768 Parameter Verification", results
 
@@ -124,7 +124,7 @@ def verify_x25519_security():
     results.append(("Field prime p = 2^255 - 19", p == 2**255 - 19))
 
     # Classical security: ~128 bits via Pollard's rho
-    # Cost of Pollard's rho = O(sqrt(ell)) ≈ O(2^126)
+    # Cost of Pollard's rho = O(sqrt(ell)) ~= O(2^126)
     classical_bits = math.log2(math.isqrt(ell))
     results.append((f"Classical ECDLP security: {classical_bits:.1f} bits", classical_bits >= 125))
 
@@ -220,7 +220,7 @@ def verify_aes_gcm():
     results.append((f"Tag size: {tag_bits} bits", tag_bits == 128))
 
     # Birthday bound for nonce collision under a single key
-    # P(collision) ≈ n^2 / (2 * 2^96) where n = number of encryptions
+    # P(collision) ~= n^2 / (2 * 2^96) where n = number of encryptions
     #
     # For P(collision) < 2^{-32} (NIST recommendation):
     #   n < 2^{32} encryptions per key
@@ -372,7 +372,7 @@ def verify_hkdf():
     # X25519 shared secret: ~253 bits of entropy (curve cofactor = 8,
     #   but CDH assumption gives full 253-bit indistinguishability)
     # Combined: min(256, 253) = 253 bits minimum, effectively 256
-    results.append(("IKM min-entropy ≥ 253 bits (CDH + KEM guarantees)", True))
+    results.append(("IKM min-entropy >= 253 bits (CDH + KEM guarantees)", True))
 
     # Extract step: PRK = HMAC-SHA256(salt, IKM)
     # With |IKM| = 512 bits > 256 bits = |PRK|, the extract step
@@ -501,9 +501,9 @@ def composite_security_level():
     results.append((f"System quantum security: {system_quantum} bits (AES-256 Grover bound)", system_quantum >= 128))
 
     # NIST security level mapping (based on hybrid classical security)
-    # Level 1: ≥ AES-128 (128 bits classical)
-    # Level 3: ≥ AES-192 (192 bits classical)
-    # Level 5: ≥ AES-256 (256 bits classical)
+    # Level 1: >= AES-128 (128 bits classical)
+    # Level 3: >= AES-192 (192 bits classical)
+    # Level 5: >= AES-256 (256 bits classical)
     if overall_classical >= 256:
         nist_level = 5
     elif overall_classical >= 192:
@@ -528,8 +528,8 @@ def birthday_analysis():
 
     # ML-KEM shared secret collisions (256-bit)
     ss_bits = 256
-    # P(collision among n shared secrets) ≈ n^2 / (2 * 2^256)
-    # For n = 2^64 (impossibly many secrets): P ≈ 2^{128} / 2^{257} = 2^{-129}
+    # P(collision among n shared secrets) ~= n^2 / (2 * 2^256)
+    # For n = 2^64 (impossibly many secrets): P ~= 2^{128} / 2^{257} = 2^{-129}
     results.append((f"ML-KEM-768 shared secret: 256-bit, collision at 2^128 operations", True))
 
     # AES-GCM nonce collisions (96-bit)

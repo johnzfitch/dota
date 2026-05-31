@@ -29,8 +29,10 @@ type RawExpandedDecapsulationKeyBytes =
 #[derive(Clone)]
 pub struct MlKemPublicKey(Vec<u8>);
 
-/// ML-KEM-768 private key in expanded 2400-byte form, preserved to keep the
-/// current vault byte contract stable until the v6 format migration lands.
+/// ML-KEM-768 private key in expanded 2400-byte form. The expanded encoding
+/// is part of the v7 on-disk contract -- switching to the FIPS 203 seed form
+/// (which is what the standard actually canonicalizes) would require a v8
+/// bump and is intentionally deferred.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MlKemPrivateKey(Vec<u8>);
 

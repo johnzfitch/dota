@@ -1,18 +1,18 @@
 """
 Manim scenes for the TC-HKEM (Triple-Committed Hybrid KEM) paper.
-Generates both static figures (for LaTeX) and animated videos (v1→v7 evolution).
+Generates both static figures (for LaTeX) and animated videos (v1->v7 evolution).
 """
 from manim import *
 import numpy as np
 
-# ── Color palette ────────────────────────────────────────────────────────────
-PQ_COLOR = "#6C5CE7"       # Post-quantum (ML-KEM) — purple
-CLASSICAL_COLOR = "#00B894" # Classical (X25519) — green
-MK_COLOR = "#E17055"        # Master key / passphrase — orange-red
-DERIVED_COLOR = "#FDCB6E"   # Derived key — gold
-HKDF_COLOR = "#0984E3"      # HKDF combiner — blue
-COMMIT_COLOR = "#D63031"    # Commitment — red
-AES_COLOR = "#00CEC9"       # AES-GCM — teal
+# -- Color palette ------------------------------------------------------------
+PQ_COLOR = "#6C5CE7"       # Post-quantum (ML-KEM) -- purple
+CLASSICAL_COLOR = "#00B894" # Classical (X25519) -- green
+MK_COLOR = "#E17055"        # Master key / passphrase -- orange-red
+DERIVED_COLOR = "#FDCB6E"   # Derived key -- gold
+HKDF_COLOR = "#0984E3"      # HKDF combiner -- blue
+COMMIT_COLOR = "#D63031"    # Commitment -- red
+AES_COLOR = "#00CEC9"       # AES-GCM -- teal
 BG_DARK = "#1A1A2E"
 
 config.background_color = BG_DARK
@@ -23,10 +23,10 @@ class TCHKEMConstruction(Scene):
 
     def construct(self):
         title = Text("TC-HKEM Construction", font_size=36, color=WHITE).to_edge(UP, buff=0.4)
-        subtitle = Text("Triple-Committed Hybrid KEM — dota v7", font_size=20, color=GREY_B).next_to(title, DOWN, buff=0.15)
+        subtitle = Text("Triple-Committed Hybrid KEM -- dota v7", font_size=20, color=GREY_B).next_to(title, DOWN, buff=0.15)
         self.add(title, subtitle)
 
-        # ── Input boxes ──────────────────────────────────────────────────
+        # -- Input boxes --------------------------------------------------
         def make_box(label, color, width=2.0, height=0.7):
             r = RoundedRectangle(corner_radius=0.12, width=width, height=height,
                                  stroke_color=color, fill_color=color, fill_opacity=0.15, stroke_width=2)
@@ -51,7 +51,7 @@ class TCHKEMConstruction(Scene):
             t = Text(lbl, font_size=11, color=GREY_B).next_to(box, UP, buff=0.12)
             self.add(t)
 
-        # ── HMAC commitment box ──────────────────────────────────────────
+        # -- HMAC commitment box ------------------------------------------
         mk_box = make_box("mk", MK_COLOR, 1.3, 0.6)
         mk_box.move_to(RIGHT * 4.2 + DOWN * 0.3)
         mk_label = Text("Argon2id\nmaster key", font_size=11, color=GREY_B).next_to(mk_box, UP, buff=0.1)
@@ -74,7 +74,7 @@ class TCHKEMConstruction(Scene):
                       stroke_width=1.5, color=MK_COLOR, max_tip_length_to_length_ratio=0.15)
         self.add(arr1, arr2, arr3)
 
-        # ── Concatenation bar ────────────────────────────────────────────
+        # -- Concatenation bar --------------------------------------------
         concat_rect = RoundedRectangle(corner_radius=0.08, width=9.5, height=0.6,
                                         stroke_color=GREY_A, fill_color=WHITE,
                                         fill_opacity=0.05, stroke_width=1.5)
@@ -113,7 +113,7 @@ class TCHKEMConstruction(Scene):
                         max_tip_length_to_length_ratio=0.12)
         self.add(arr_tau)
 
-        # ── HKDF box ────────────────────────────────────────────────────
+        # -- HKDF box ----------------------------------------------------
         hkdf_box = RoundedRectangle(corner_radius=0.12, width=4.5, height=0.7,
                                      stroke_color=HKDF_COLOR, fill_color=HKDF_COLOR,
                                      fill_opacity=0.15, stroke_width=2.5)
@@ -127,7 +127,7 @@ class TCHKEMConstruction(Scene):
                          stroke_width=2, color=GREY_A, max_tip_length_to_length_ratio=0.1)
         self.add(arr_ikm)
 
-        # ── Output AES key ──────────────────────────────────────────────
+        # -- Output AES key ----------------------------------------------
         aes_box = make_box("AES-256 Key", AES_COLOR, 2.5, 0.6)
         aes_box.move_to(DOWN * 3.7)
         aes_label = Text("Per-secret encryption key (256 bits)", font_size=12, color=GREY_B).next_to(aes_box, DOWN, buff=0.1)
@@ -144,7 +144,7 @@ class GameHopping(Scene):
     """Figure 2: The 4-game security proof for TC-HKEM."""
 
     def construct(self):
-        title = Text("TC-HKEM Security Proof — Game Sequence", font_size=32, color=WHITE).to_edge(UP, buff=0.4)
+        title = Text("TC-HKEM Security Proof -- Game Sequence", font_size=32, color=WHITE).to_edge(UP, buff=0.4)
         self.add(title)
 
         games = [
@@ -202,17 +202,17 @@ class GameHopping(Scene):
         final_box = SurroundingRectangle(final, buff=0.15, corner_radius=0.1,
                                           stroke_color=DERIVED_COLOR, fill_color=DERIVED_COLOR,
                                           fill_opacity=0.05, stroke_width=1.5)
-        thm = Text("Theorem 1 — Best-of-Both-Worlds", font_size=14, color=DERIVED_COLOR)
+        thm = Text("Theorem 1 -- Best-of-Both-Worlds", font_size=14, color=DERIVED_COLOR)
         thm.next_to(final_box, UP, buff=0.1)
         self.add(final_box, final, thm)
         self.wait(0.1)
 
 
 class VersionEvolution(Scene):
-    """Animated scene: v1 → v7 vault evolution."""
+    """Animated scene: v1 -> v7 vault evolution."""
 
     def construct(self):
-        title = Text("dota Vault Evolution: v1 → v7", font_size=34, color=WHITE).to_edge(UP, buff=0.3)
+        title = Text("dota Vault Evolution: v1 -> v7", font_size=34, color=WHITE).to_edge(UP, buff=0.3)
         self.play(Write(title), run_time=1)
 
         versions = [
@@ -236,7 +236,7 @@ class VersionEvolution(Scene):
             )
             ver_text = Text(ver, font_size=20, color=color, weight=BOLD)
             desc_text = Text(desc, font_size=14, color=WHITE)
-            feat_text = Text(" · ".join(features), font_size=11, color=GREY_B)
+            feat_text = Text(" . ".join(features), font_size=11, color=GREY_B)
             content = VGroup(ver_text, desc_text, feat_text).arrange(RIGHT, buff=0.5)
             content.move_to(layer.get_center())
             stack.add(VGroup(layer, content))
@@ -257,7 +257,7 @@ class VersionEvolution(Scene):
             stack[-1], buff=0.08, corner_radius=0.12,
             stroke_color=DERIVED_COLOR, stroke_width=3
         )
-        v7_label = Text("← TC-HKEM: Best-of-both-worlds IND-CCA + passphrase binding",
+        v7_label = Text("<- TC-HKEM: Best-of-both-worlds IND-CCA + passphrase binding",
                          font_size=14, color=DERIVED_COLOR)
         v7_label.next_to(v7_highlight, RIGHT, buff=0.15)
 
@@ -266,7 +266,7 @@ class VersionEvolution(Scene):
 
 
 class PassphraseBinding(Scene):
-    """Figure 3: Theorem 2 — Passphrase binding property."""
+    """Figure 3: Theorem 2 -- Passphrase binding property."""
 
     def construct(self):
         title = Text("Theorem 2: Passphrase Binding", font_size=32, color=WHITE).to_edge(UP, buff=0.4)
@@ -277,10 +277,10 @@ class PassphraseBinding(Scene):
         # Left: attacker has
         attacker_title = Text("Attacker knows:", font_size=18, color=COMMIT_COLOR).move_to(LEFT * 3.5 + UP * 1.2)
         has_items = VGroup(
-            Text("✓  dk (ML-KEM private key)", font_size=14, color=PQ_COLOR),
-            Text("✓  sk_dh (X25519 private key)", font_size=14, color=CLASSICAL_COLOR),
-            Text("✓  ek, pk_dh (public keys)", font_size=14, color=GREY_B),
-            Text("✗  mk (master key)", font_size=14, color=COMMIT_COLOR),
+            Text("?  dk (ML-KEM private key)", font_size=14, color=PQ_COLOR),
+            Text("?  sk_dh (X25519 private key)", font_size=14, color=CLASSICAL_COLOR),
+            Text("?  ek, pk_dh (public keys)", font_size=14, color=GREY_B),
+            Text("?  mk (master key)", font_size=14, color=COMMIT_COLOR),
         ).arrange(DOWN, buff=0.15, aligned_edge=LEFT).next_to(attacker_title, DOWN, buff=0.2)
         self.add(attacker_title, has_items)
 
@@ -289,20 +289,20 @@ class PassphraseBinding(Scene):
 
         game0 = VGroup(
             Text("Game 0:", font_size=14, color=WHITE, weight=BOLD),
-            Text("τ* = HMAC(mk, ct* ‖ eph*)", font_size=13, color=GREY_B),
+            Text("tau* = HMAC(mk, ct* || eph*)", font_size=13, color=GREY_B),
             Text("Only unknown in IKM", font_size=12, color=GREY_C),
         ).arrange(DOWN, buff=0.08, aligned_edge=LEFT)
 
         game1 = VGroup(
             Text("Game 1:", font_size=14, color=WHITE, weight=BOLD),
-            Text("Replace HMAC(mk,·) with R(·)", font_size=13, color=GREY_B),
+            Text("Replace HMAC(mk,.) with R(.)", font_size=13, color=GREY_B),
             MathTex(r"|\Pr[G_0] - \Pr[G_1]| \leq \text{Adv}^{\text{prf}}_{\text{HMAC}}",
                     font_size=16, color=MK_COLOR),
         ).arrange(DOWN, buff=0.08, aligned_edge=LEFT)
 
         game2 = VGroup(
             Text("Game 2:", font_size=14, color=WHITE, weight=BOLD),
-            Text("τ* = R(ct* ‖ eph*) is uniform", font_size=13, color=GREY_B),
+            Text("tau* = R(ct* || eph*) is uniform", font_size=13, color=GREY_B),
             MathTex(r"K^* \text{ indistinguishable from random}",
                     font_size=16, color=DERIVED_COLOR),
         ).arrange(DOWN, buff=0.08, aligned_edge=LEFT)
@@ -350,7 +350,7 @@ class CombinerComparison(Scene):
             "v6 Combiner (64-byte IKM)",
             [("ss_{kem}", PQ_COLOR), ("ss_{dh}", CLASSICAL_COLOR)],
             GREY_A,
-            "⚠ Worst-of-both-worlds\n(both must hold)"
+            "? Worst-of-both-worlds\n(both must hold)"
         )
 
         v7 = make_combiner(
@@ -359,7 +359,7 @@ class CombinerComparison(Scene):
              ("ct_{kem}", PQ_COLOR), ("eph_{pk}", CLASSICAL_COLOR),
              (r"\tau", COMMIT_COLOR)],
             DERIVED_COLOR,
-            "✓ Best-of-both-worlds\n+ passphrase binding"
+            "? Best-of-both-worlds\n+ passphrase binding"
         )
 
         comparison = VGroup(v6, v7).arrange(DOWN, buff=0.8)

@@ -13,12 +13,48 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Print toolchain version
+        run: rustc --version && cargo --version
       - name: Run tests
-        run: cargo test --all --verbose
+        id: tests
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          set -o pipefail
+          cargo test --all --verbose -- --test-threads=1 2>&1 | tee /tmp/test_output.log
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ github.run_id }}
+          path: /tmp/test_output.log
+          retention-days: 7
+      - name: Post test tail to PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let log = '';
+            try { log = fs.readFileSync('/tmp/test_output.log', 'utf8'); }
+            catch (e) { log = 'no log captured: ' + e.message; }
+            // Keep only the last ~6000 characters so we stay under the comment limit
+            // and focus on the failure tail.
+            const tail = log.length > 6000 ? '...\n' + log.slice(log.length - 6000) : log;
+            const body = '<details><summary>cargo test failure tail (CI debugging - auto-posted)</summary>\n\n```\n' + tail + '\n```\n</details>';
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
 
   clippy:
     name: Clippy

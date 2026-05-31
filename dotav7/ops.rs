@@ -219,13 +219,13 @@ pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) ->
         );
         if !security::constant_time_eq(stored_commitment, &expected) {
             anyhow::bail!(
-                "Key commitment mismatch — vault may have been tampered with \
+                "Key commitment mismatch -- vault may have been tampered with \
                  (KDF parameters or public keys were modified), or wrong passphrase"
             );
         }
     } else if vault.version >= V5_VAULT_VERSION {
         anyhow::bail!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         );
@@ -237,7 +237,7 @@ pub(crate) fn verify_v5_key_commitment(vault: &Vault, master_key: &MasterKey) ->
 pub(crate) fn verify_v6_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         )
@@ -245,7 +245,7 @@ pub(crate) fn verify_v6_key_commitment(vault: &Vault, master_key: &MasterKey) ->
     let expected = compute_v6_key_commitment(master_key, vault)?;
     if !security::constant_time_eq(stored_commitment, &expected) {
         anyhow::bail!(
-            "Key commitment mismatch — vault may have been tampered with \
+            "Key commitment mismatch -- vault may have been tampered with \
              (KDF parameters, suite, or public keys were modified), or wrong passphrase"
         );
     }
@@ -477,7 +477,7 @@ pub fn rotate_keys(unlocked: &mut UnlockedVault, passphrase: &str) -> Result<()>
             },
         );
     }
-    // `secrets` Vec<(String, SecretString, ...)> drops here — each
+    // `secrets` Vec<(String, SecretString, ...)> drops here -- each
     // SecretString is zeroized via ZeroizeOnDrop.
 
     save_vault(unlocked)?;
@@ -531,7 +531,7 @@ pub fn get_secret(unlocked: &UnlockedVault, name: &str) -> Result<SecretString> 
         )?,
     };
 
-    // Decrypt the secret value — wrap in SecretVec for zeroization
+    // Decrypt the secret value -- wrap in SecretVec for zeroization
     let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into()?;
     let plaintext = SecretVec::new(aes_decrypt(&aes_key, &encrypted.ciphertext, &nonce)?);
 
@@ -661,7 +661,7 @@ const WRAP_LABEL_X25519_V7: &[u8] = b"dota-v7-wrap-x25519";
 
 /// Derive separate wrapping keys for ML-KEM and X25519 private key encryption.
 ///
-/// Uses HKDF-Expand (no extract step — the master key from Argon2id is already
+/// Uses HKDF-Expand (no extract step -- the master key from Argon2id is already
 /// a high-quality PRF output) with distinct purpose labels.
 fn derive_wrapping_keys_with_labels(
     mk: &MasterKey,
@@ -683,7 +683,7 @@ fn derive_wrapping_keys_with_labels(
         mlkem: AesKey::from_bytes(*mlkem_key),
         x25519: AesKey::from_bytes(*x25519_key),
     };
-    // Zeroize stack temporaries — data now lives inside AesKey (ZeroizeOnDrop)
+    // Zeroize stack temporaries -- data now lives inside AesKey (ZeroizeOnDrop)
     mlkem_key.zeroize();
     x25519_key.zeroize();
     std::hint::black_box(&mlkem_key);
@@ -719,7 +719,7 @@ pub(crate) fn derive_wrapping_keys_for_vault_version(
     }
 }
 
-// ── Key commitment ──────────────────────────────────────────────────────────
+// -- Key commitment ----------------------------------------------------------
 
 /// Domain separator for the legacy v5 key commitment.
 const KEY_COMMITMENT_LABEL_V5: &[u8] = b"dota-v5-key-commitment";
@@ -829,7 +829,7 @@ pub(crate) fn compute_v7_key_commitment(master_key: &MasterKey, vault: &Vault) -
 fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()> {
     let stored_commitment = vault.key_commitment.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
-            "Vault version {} requires a key commitment, but none was found — \
+            "Vault version {} requires a key commitment, but none was found -- \
              vault file may have been tampered with",
             vault.version
         )
@@ -837,7 +837,7 @@ fn verify_v7_key_commitment(vault: &Vault, master_key: &MasterKey) -> Result<()>
     let expected = compute_v7_key_commitment(master_key, vault)?;
     if !security::constant_time_eq(stored_commitment, &expected) {
         anyhow::bail!(
-            "Key commitment mismatch — vault may have been tampered with \
+            "Key commitment mismatch -- vault may have been tampered with \
              (KDF parameters, suite, or public keys were modified), or wrong passphrase"
         );
     }
@@ -862,12 +862,12 @@ pub(crate) fn compute_key_commitment(master_key: &MasterKey, vault: &Vault) -> R
     }
 }
 
-// ── Vault migration ─────────────────────────────────────────────────────────
+// -- Vault migration ---------------------------------------------------------
 
 /// Migrate a vault file to the current format version.
 ///
 /// - Versions < 4 are rejected (no vaults in the wild).
-/// - Version 4 → 5: adds key commitment, bumps version.
+/// - Version 4 -> 5: adds key commitment, bumps version.
 /// - Version 5: already current, no-op.
 #[allow(dead_code)]
 pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
@@ -885,7 +885,7 @@ pub fn migrate_vault(passphrase: &str, vault_path: &str) -> Result<()> {
         return Ok(()); // Already current
     }
 
-    // v4 → v5: derive master key, compute commitment, save
+    // v4 -> v5: derive master key, compute commitment, save
     let kdf_config = KdfConfig {
         salt: vault.kdf.salt.clone(),
         time_cost: vault.kdf.time_cost,
@@ -1642,7 +1642,7 @@ mod tests {
         assert_eq!(raw["version"], 5);
         std::fs::write(vault_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
-        // Unlock must fail — missing commitment on a v5 vault is tamper evidence
+        // Unlock must fail -- missing commitment on a v5 vault is tamper evidence
         let err = unlock_vault("test-pass", vault_path).unwrap_err();
         assert!(
             err.to_string().contains("requires a key commitment"),
