@@ -1,0 +1,61 @@
+# cargo-deny configuration for dota.
+#
+# Enforces a license allowlist, flags banned/wildcard crates, and constrains the
+# crate sources for a security-critical post-quantum vault. Run with:
+#
+#     cargo deny check bans licenses sources
+#
+# Closes SECURITY-AUDIT.md H4 (no source/license allowlist enforcement). This
+# file is deliberately the *non-advisory* complement to the existing
+# `rustsec/audit-check` CI step: RustSec advisories (vulnerabilities, yanks,
+# unmaintained/unsound crates) remain owned solely by that step, with their
+# allow/ignore list in `.cargo/audit.toml`. Running cargo-deny's `advisories`
+# check here too would create a second, divergent advisory gate, so the CI job
+# scopes itself to `bans licenses sources`.
+
+[licenses]
+version = 2
+# Permissive licenses only. A copyleft license slipping into a statically
+# linked secrets manager would be both a legal and a supply-chain surprise.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # BSL-1.0 (Boost): clipboard-win + error-code, pulled in by arboard's
+    # Windows clipboard backend. cargo-deny evaluates all target platforms by
+    # default, so these are license-checked on the Linux CI runner even though
+    # the Windows backend is never compiled here. Boost is a permissive,
+    # OSI-style license with no copyleft obligation.
+    "BSL-1.0",
+    # MIT-0 (MIT No Attribution): appears in OR-expressions for a few build/dev
+    # transitives (e.g. dunce). Strictly more permissive than MIT.
+    "MIT-0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Multiple versions of the same crate are a smell in a security build; warn so a
+# reviewer notices a duplicated transitive dependency.
+multiple-versions = "warn"
+wildcards = "deny"
+# Never allow a second, ambiguous crypto implementation to creep in.
+deny = [
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "ring", wrappers = [] },
+]
+
+[sources]
+# Only crates.io. A git or alternate-registry source for a crypto crate must be
+# an explicit, reviewed decision, not a silent `cargo update` outcome.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
